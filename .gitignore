@@ -1,0 +1,7 @@
+snt-bot
+config.json
+data.json
+*.db
+*.db-wal
+*.db-shm
+*.tmp
