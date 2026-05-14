@@ -20,6 +20,16 @@ rtk proxy curl -s --connect-timeout 30 http://10.8.0.4:8181/v1/chat/completions 
   }'
 ```
 
+## Model Tests (SLOW — special ask required)
+
+`tests/model_test.go` makes real AI calls (240 s timeout each). **Do NOT run these tests by default.**
+Only run when the user explicitly asks, e.g. "run the model tests" or "run tests/model_test.go".
+
+```bash
+# Only when explicitly requested:
+go test -v -timeout 600s ./tests/ -run TestExtraction
+```
+
 ## Project Structure
 
 - `prompts/extraction_agent.md` — system prompt for AI extraction layer. Contains `{{PLACEHOLDERS}}` injected at runtime by Go.
