@@ -8,3 +8,5 @@ data.json
 *.db-shm
 *.tmp
 .venv-pdf/
+.omc/
+.omx/
