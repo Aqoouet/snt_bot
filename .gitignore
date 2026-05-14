@@ -1,7 +1,10 @@
 snt-bot
 config.json
 data.json
+.env
+*.xlsm
 *.db
 *.db-wal
 *.db-shm
 *.tmp
+.venv-pdf/

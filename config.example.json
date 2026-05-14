@@ -1,8 +1,0 @@
-{
-  "bot_token": "123456789:AABBCCDDEEFFaabbccddeeff-your-token",
-  "admin_id": 123456789,
-  "starting_balance": 50000.00,
-  "db_file": "snt.db",
-  "categories": ["Электричество", "Водоснабжение", "Охрана", "Уборка", "Ремонт", "Прочее"],
-  "state_timeout_minutes": 5
-}
