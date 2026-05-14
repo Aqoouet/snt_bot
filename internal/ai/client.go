@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const modelCallTimeout = 180 * time.Second
+
 type Msg struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -114,7 +116,7 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 		return Response{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, modelCallTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(callCtx, "POST", c.chatURL, bytes.NewReader(body))

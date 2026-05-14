@@ -407,7 +407,7 @@ Indexes: `op_date`, `created_at`, `(plot, fiscal_year)`.
 - One active `ConversationState` per user. New **Добавить операцию** tap while state exists: warn user, overwrite state.
 - DB writes always transactional — partial distribution never committed.
 - Conversation history cleared on: confirm, cancel, timeout (`STATE_TIMEOUT_MINUTES`).
-- AI response timeout: configurable, default 15s; on timeout retry once, then show user error message.
+- AI response timeout: configurable, default 180s; on timeout retry once, then show user error message.
 
 ---
 
@@ -484,4 +484,3 @@ RTK intercepts plain `curl` output and replaces it with a schema template. Use `
 ```bash
 rtk proxy curl -s http://10.8.0.4:8181/v1/chat/completions ...
 ```
-
