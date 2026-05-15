@@ -20,16 +20,25 @@ The deployed runtime consists of:
 
 ## Build and upload
 
-Build for the remote Linux host:
+> **The binary is built locally and committed to the repository. Do not compile on the server.**
+> The `snt-bot` linux/amd64 binary is tracked in git so the server only needs to receive the pre-built artifact.
+
+Build locally (cross-compile for linux/amd64):
 
 ```bash
 env GOCACHE="$PWD/.gocache" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$PWD/snt-bot" ./
 ```
 
-Upload the runtime files:
+Upload the binary and prompt, then restart:
 
 ```bash
-tar -czf - snt-bot .env prompts/extraction_agent.md | ssh hostkey_us 'mkdir -p /opt/snt-bot/prompts && cd /opt/snt-bot && tar -xzf -'
+tar -czf - snt-bot prompts/extraction_agent.md | ssh hostkey_us 'mkdir -p /opt/snt-bot/prompts && cd /opt/snt-bot && tar -xzf - && systemctl restart snt-bot'
+```
+
+`.env` is not committed to git. Upload it separately on first deploy or when it changes:
+
+```bash
+scp .env hostkey_us:/opt/snt-bot/.env
 ```
 
 ## Systemd service
