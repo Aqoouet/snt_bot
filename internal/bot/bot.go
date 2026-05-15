@@ -324,16 +324,23 @@ func (b *Bot) handleBalanceN(chatID, userID int64, text string) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Баланс: %.2f руб.\nПриход всего: %.2f руб.\nРасход всего: %.2f руб.\n\n",
-		bal, income, expense))
-	sb.WriteString(fmt.Sprintf("Последние %d операций:\n", len(ops)))
+	sb.WriteString(fmt.Sprintf("📊 Баланс: %.2f руб.\n", bal))
+	sb.WriteString(fmt.Sprintf("⬆️ Приход всего: %.2f руб.\n", income))
+	sb.WriteString(fmt.Sprintf("⬇️ Расход всего: %.2f руб.\n", expense))
+	sb.WriteString(fmt.Sprintf("\n🕐 Последние %d операций:\n", len(ops)))
 	for _, op := range ops {
-		sign := "+"
+		dirEmoji := "⬆️"
 		if op.Direction == "расход" {
-			sign = "-"
+			dirEmoji = "⬇️"
 		}
-		sb.WriteString(fmt.Sprintf("%s  %s%.2f  %s  %s  %s  %s\n",
-			op.OpDate, sign, op.Amount, op.Category, op.Plot, op.Membership, op.PaymentType))
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("📅 Дата: %s\n", op.OpDate))
+		sb.WriteString(fmt.Sprintf("%s Направление: %s\n", dirEmoji, op.Direction))
+		sb.WriteString(fmt.Sprintf("💰 Сумма: %.2f руб.\n", op.Amount))
+		sb.WriteString(fmt.Sprintf("📂 Категория: %s\n", op.Category))
+		sb.WriteString(fmt.Sprintf("🏡 Участок: %s\n", op.Plot))
+		sb.WriteString(fmt.Sprintf("👥 Членство: %s\n", op.Membership))
+		sb.WriteString(fmt.Sprintf("💳 Тип платежа: %s\n", op.PaymentType))
 	}
 
 	b.states.Clear(userID)
@@ -518,18 +525,32 @@ func confirmKeyboard() tgbotapi.InlineKeyboardMarkup {
 
 func formatPreview(rows []distribution.DistributionRow, curBal float64) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Предпросмотр (%d строк):\n\n", len(rows)))
+	sb.WriteString(fmt.Sprintf("📋 Предпросмотр (%d строк):\n", len(rows)))
 	bal := curBal
-	for _, r := range rows {
+	for i, r := range rows {
 		if r.Direction == "приход" {
 			bal += r.Amount
 		} else {
 			bal -= r.Amount
 		}
-		sb.WriteString(fmt.Sprintf("• %s  %.2f руб.  %d г.  %s/%s → %.2f\n",
-			r.ContributionID, r.Amount, r.FiscalYear, r.Membership, r.Plot, bal))
+		dirEmoji := "⬆️"
+		if r.Direction == "расход" {
+			dirEmoji = "⬇️"
+		}
+		if len(rows) > 1 {
+			sb.WriteString(fmt.Sprintf("\n─── Строка %d ───\n", i+1))
+		} else {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(fmt.Sprintf("📂 Категория: %s\n", r.ContributionID))
+		sb.WriteString(fmt.Sprintf("%s Направление: %s\n", dirEmoji, r.Direction))
+		sb.WriteString(fmt.Sprintf("💰 Сумма: %.2f руб.\n", r.Amount))
+		sb.WriteString(fmt.Sprintf("📅 Год: %d\n", r.FiscalYear))
+		sb.WriteString(fmt.Sprintf("🏡 Участок: %s\n", r.Plot))
+		sb.WriteString(fmt.Sprintf("👥 Членство: %s\n", r.Membership))
+		sb.WriteString(fmt.Sprintf("📊 Баланс после: %.2f руб.\n", bal))
 	}
-	sb.WriteString(fmt.Sprintf("\nФинальный баланс: %.2f руб.", bal))
+	sb.WriteString(fmt.Sprintf("\n💳 Итоговый баланс: %.2f руб.", bal))
 	return sb.String()
 }
 
