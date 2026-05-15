@@ -9,3 +9,11 @@ data.json
 .venv-pdf/
 .omc/
 .omx/
+
+# Temporary and generated files
+.gocache/
+.~lock.*
+REVIEW_CAVEMAN.md
+repomix-output.xml
+repomix.config.json
+
