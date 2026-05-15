@@ -16,4 +16,6 @@ data.json
 REVIEW_CAVEMAN.md
 repomix-output.xml
 repomix.config.json
+.env.deepseek
+.env.local
 
