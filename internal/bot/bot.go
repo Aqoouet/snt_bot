@@ -44,6 +44,7 @@ type Bot struct {
 	states  *state.Manager
 	mu      sync.Mutex
 	pending map[int64]*pendingConfirm
+	busy    map[int64]bool
 }
 
 func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, states *state.Manager) (*Bot, error) {
@@ -58,6 +59,7 @@ func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, sta
 		client:  client,
 		states:  states,
 		pending: make(map[int64]*pendingConfirm),
+		busy:    make(map[int64]bool),
 	}, nil
 }
 
@@ -89,6 +91,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if text == "Отмена" || (msg.IsCommand() && msg.Command() == "start") {
 		b.states.Clear(userID)
 		b.clearPending(userID)
+		b.clearBusy(userID)
 		b.sendMenu(chatID, "Главное меню.")
 		return
 	}
@@ -136,12 +139,31 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	if text != "" {
 		st.History = append(st.History, ai.Msg{Role: "user", Content: text})
 		b.states.Set(userID, st)
+	} else if len(st.History) == 0 {
+		// First call with no user input — ask user to describe the operation directly,
+		// no AI call needed yet.
+		b.send(chatID, "Опишите операцию: дата, сумма, участок, тип платежа, категория. Можно одним сообщением или по частям.")
+		return
 	}
+
+	b.mu.Lock()
+	if b.busy[userID] {
+		b.mu.Unlock()
+		b.send(chatID, "Обрабатываю предыдущий запрос, подождите...")
+		return
+	}
+	b.busy[userID] = true
+	b.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	resp, err := b.client.Call(ctx, st.History)
+
+	b.mu.Lock()
+	delete(b.busy, userID)
+	b.mu.Unlock()
+
 	if err != nil {
 		log.Printf("ai call error user %d: %v", userID, err)
 		b.send(chatID, "Ошибка связи с AI. Попробуйте ещё раз.")
@@ -462,6 +484,12 @@ func (b *Bot) clearPending(userID int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.pending, userID)
+}
+
+func (b *Bot) clearBusy(userID int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.busy, userID)
 }
 
 func mainKeyboard() tgbotapi.ReplyKeyboardMarkup {
