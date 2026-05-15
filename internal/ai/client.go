@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const modelCallTimeout = 180 * time.Second
+const modelCallTimeout = 300 * time.Second
 
 type Msg struct {
 	Role    string `json:"role"`

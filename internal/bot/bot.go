@@ -155,7 +155,7 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	b.busy[userID] = true
 	b.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	resp, err := b.client.Call(ctx, st.History)
