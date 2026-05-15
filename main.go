@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"snt-bot/internal/ai"
@@ -29,7 +32,11 @@ func main() {
 	}
 	defer sqlDB.Close()
 
-	promptTpl, err := os.ReadFile("prompts/extraction_agent.md")
+	promptPath := os.Getenv("PROMPT_PATH")
+	if promptPath == "" {
+		promptPath = "prompts/extraction_agent.md"
+	}
+	promptTpl, err := os.ReadFile(promptPath)
 	if err != nil {
 		log.Fatalf("read prompt: %v", err)
 	}
@@ -41,7 +48,7 @@ func main() {
 	sysPrompt := ai.BuildPrompt(
 		string(promptTpl),
 		cfg.PaymentTypes,
-		cfg.Plots,
+		cfg.Plots(),
 		cfg.CategoriesIncome,
 		cfg.CategoriesExpense,
 		today,
@@ -56,5 +63,10 @@ func main() {
 		log.Fatalf("create bot: %v", err)
 	}
 
-	b.Run()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go b.Run()
+	<-ctx.Done()
+	b.Stop()
 }

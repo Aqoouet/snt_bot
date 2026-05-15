@@ -135,21 +135,26 @@ func CommitDistribution(sqlDB *sql.DB, rows []DistributionRow, initialBalance fl
 
 	groupID := uuid.New().String()
 
-	for i := range rows {
-		rows[i].BalanceAfter = round2(runningBalance + rows[i].Amount)
-		runningBalance = rows[i].BalanceAfter
+	for _, r := range rows {
+		var balanceAfter float64
+		if r.Direction == "расход" {
+			balanceAfter = round2(runningBalance - r.Amount)
+		} else {
+			balanceAfter = round2(runningBalance + r.Amount)
+		}
+		runningBalance = balanceAfter
 
 		row := db.OperationRow{
-			Membership:     rows[i].Membership,
-			OpDate:         rows[i].OpDate,
-			Direction:      rows[i].Direction,
-			Amount:         rows[i].Amount,
-			PaymentType:    rows[i].PaymentType,
-			Plot:           rows[i].Plot,
-			FiscalYear:     rows[i].FiscalYear,
-			Category:       rows[i].Category,
-			Note:           rows[i].Note,
-			BalanceAfter:   rows[i].BalanceAfter,
+			Membership:     r.Membership,
+			OpDate:         r.OpDate,
+			Direction:      r.Direction,
+			Amount:         r.Amount,
+			PaymentType:    r.PaymentType,
+			Plot:           r.Plot,
+			FiscalYear:     r.FiscalYear,
+			Category:       r.Category,
+			Note:           r.Note,
+			BalanceAfter:   balanceAfter,
 			PaymentGroupID: groupID,
 		}
 		if err := db.InsertOperation(tx, row); err != nil {

@@ -156,7 +156,7 @@ func scanRows(rows *sql.Rows) ([]OperationRow, error) {
 		); err != nil {
 			return nil, err
 		}
-		r.CreatedAt, _ = time.Parse("2006-01-02T15:04:05Z", createdAt)
+		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 		result = append(result, r)
 	}
 	return result, rows.Err()

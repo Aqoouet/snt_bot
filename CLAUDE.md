@@ -20,6 +20,12 @@ rtk proxy curl -s --connect-timeout 30 http://10.8.0.4:8181/v1/chat/completions 
   }'
 ```
 
+## Sequential AI Calls (by design)
+
+`Bot.handleAdding` blocks concurrent AI calls per user via the `busy` map. This is intentional: llama.cpp
+crashes or produces garbage when hit with overlapping requests from the same session. Do not parallelize
+AI calls within a single user flow.
+
 ## Model Tests (SLOW — special ask required)
 
 `tests/model_test.go` makes real AI calls (240 s timeout each). **Do NOT run these tests by default.**
@@ -28,6 +34,15 @@ Only run when the user explicitly asks, e.g. "run the model tests" or "run tests
 ```bash
 # Only when explicitly requested:
 go test -v -timeout 600s ./tests/ -run TestExtraction
+```
+
+## Distribution Tests (explicit request required)
+
+`tests/distribution_test.go` tests contribution distribution logic. Run only when explicitly asked.
+
+```bash
+# Only when explicitly requested:
+go test -v ./tests/ -run TestDistribution
 ```
 
 ## Project Structure

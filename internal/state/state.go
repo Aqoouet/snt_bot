@@ -14,13 +14,13 @@ const (
 	PhaseAdding        // waiting for AI extraction loop
 	PhaseBalance       // waiting for user to enter N
 	PhaseExport        // waiting for user to enter N
-	PhaseConfirm       // waiting for inline button confirm/cancel
 )
 
 type State struct {
-	Phase   Phase
-	History []ai.Msg
-	LastMsg time.Time
+	Phase      Phase
+	History    []ai.Msg
+	LastMsg    time.Time
+	RetryCount int // AI validation retry counter; reset on fresh user input
 }
 
 type Manager struct {

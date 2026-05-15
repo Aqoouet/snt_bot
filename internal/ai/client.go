@@ -91,8 +91,8 @@ func (c *Client) Healthy() bool {
 
 func (c *Client) Call(ctx context.Context, history []Msg) (Response, error) {
 	resp, err := c.call(ctx, history)
-	if err != nil {
-		// retry once
+	if err != nil && ctx.Err() == nil {
+		// retry once only when parent context is still alive
 		resp, err = c.call(ctx, history)
 	}
 	return resp, err
@@ -134,7 +134,10 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 	}
 	defer res.Body.Close()
 
-	raw, _ := io.ReadAll(res.Body)
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return Response{}, fmt.Errorf("read response: %w", err)
+	}
 
 	var outer struct {
 		Choices []struct {

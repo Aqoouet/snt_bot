@@ -63,6 +63,10 @@ func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, sta
 	}, nil
 }
 
+func (b *Bot) Stop() {
+	b.api.StopReceivingUpdates()
+}
+
 func (b *Bot) Run() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -137,6 +141,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	st := b.states.Get(userID)
 	if text != "" {
+		st.RetryCount = 0
 		st.History = append(st.History, ai.Msg{Role: "user", Content: text})
 		b.states.Set(userID, st)
 	} else if len(st.History) == 0 {
@@ -189,6 +194,13 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 	vf, errMsg := b.validateFields(fields)
 	if errMsg != "" {
 		st := b.states.Get(userID)
+		st.RetryCount++
+		if st.RetryCount >= 3 {
+			b.states.Clear(userID)
+			b.clearPending(userID)
+			b.sendMenu(chatID, "Не удалось извлечь корректные данные. Попробуйте снова.")
+			return
+		}
 		st.History = append(st.History, ai.Msg{
 			Role:    "system",
 			Content: "Ошибка валидации: " + errMsg + ". Уточни у пользователя.",
@@ -268,6 +280,9 @@ func (b *Bot) buildRows(vf validatedFields, year int) ([]distribution.Distributi
 }
 
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
+	if cb.Message == nil {
+		return
+	}
 	chatID := cb.Message.Chat.ID
 	userID := cb.From.ID
 
@@ -420,10 +435,19 @@ func (b *Bot) validateFields(f ai.Fields) (validatedFields, string) {
 	if amount <= 0 {
 		return validatedFields{}, "сумма должна быть положительной"
 	}
+	if f.Direction != nil && *f.Direction == "приход" &&
+		b.cfg.Limits.MaxPaymentAmount > 0 &&
+		amount > b.cfg.Limits.MaxPaymentAmount {
+		delta := amount - b.cfg.Limits.MaxPaymentAmount
+		return validatedFields{}, fmt.Sprintf(
+			"сумма %.0f руб. превышает максимум за год %.0f руб.; верните плательщику %.0f руб. сдачи",
+			amount, b.cfg.Limits.MaxPaymentAmount, delta,
+		)
+	}
 	if f.PaymentType == nil || !contains(b.cfg.PaymentTypes, *f.PaymentType) {
 		return validatedFields{}, "недопустимый тип платежа"
 	}
-	if f.Plot == nil || !contains(b.cfg.Plots, *f.Plot) {
+	if f.Plot == nil || !contains(b.cfg.Plots(), *f.Plot) {
 		return validatedFields{}, "недопустимый участок"
 	}
 	cats := b.cfg.CategoriesIncome
