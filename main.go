@@ -15,6 +15,8 @@ import (
 	"snt-bot/internal/state"
 )
 
+var buildTime = "dev"
+
 func main() {
 	cfgPath := os.Getenv("CONFIG_PATH")
 	if cfgPath == "" {
@@ -58,7 +60,7 @@ func main() {
 	client := ai.NewClient(cfg.OpenAIBaseURL, cfg.OpenAIModel, cfg.OpenAIAPIKey, sysPrompt)
 	states := state.NewManager(cfg.StateTimeoutMinutes)
 
-	b, err := bot.New(cfg.TelegramBotToken, sqlDB, cfg, client, states)
+	b, err := bot.New(cfg.TelegramBotToken, sqlDB, cfg, client, states, buildTime)
 	if err != nil {
 		log.Fatalf("create bot: %v", err)
 	}

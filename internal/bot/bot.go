@@ -21,8 +21,9 @@ import (
 )
 
 type pendingConfirm struct {
-	rows   []distribution.DistributionRow
-	curBal float64
+	rows      []distribution.DistributionRow
+	curBal    float64
+	createdAt time.Time
 }
 
 type validatedFields struct {
@@ -37,29 +38,31 @@ type validatedFields struct {
 }
 
 type Bot struct {
-	api     *tgbotapi.BotAPI
-	db      *sql.DB
-	cfg     *config.Config
-	client  *ai.Client
-	states  *state.Manager
-	mu      sync.Mutex
-	pending map[int64]*pendingConfirm
-	busy    map[int64]bool
+	api       *tgbotapi.BotAPI
+	db        *sql.DB
+	cfg       *config.Config
+	client    *ai.Client
+	states    *state.Manager
+	mu        sync.Mutex
+	pending   map[int64]*pendingConfirm
+	busy      map[int64]bool
+	buildTime string
 }
 
-func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, states *state.Manager) (*Bot, error) {
+func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, states *state.Manager, buildTime string) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("create bot api: %w", err)
 	}
 	return &Bot{
-		api:     api,
-		db:      sqlDB,
-		cfg:     cfg,
-		client:  client,
-		states:  states,
-		pending: make(map[int64]*pendingConfirm),
-		busy:    make(map[int64]bool),
+		api:       api,
+		db:        sqlDB,
+		cfg:       cfg,
+		client:    client,
+		states:    states,
+		pending:   make(map[int64]*pendingConfirm),
+		busy:      make(map[int64]bool),
+		buildTime: buildTime,
 	}, nil
 }
 
@@ -68,12 +71,19 @@ func (b *Bot) Stop() {
 }
 
 func (b *Bot) Run() {
+	msg := fmt.Sprintf("Бот запущен. Сборка: %s", b.buildTime)
+	log.Printf("startup notify: %q to %v", msg, b.cfg.TelegramAllowedUserIDs)
+	for _, uid := range b.cfg.TelegramAllowedUserIDs {
+		b.send(uid, msg)
+	}
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := b.api.GetUpdatesChan(u)
 	for update := range updates {
+		update := update
 		if update.CallbackQuery != nil {
-			b.handleCallback(update.CallbackQuery)
+			go b.handleCallback(update.CallbackQuery)
 			continue
 		}
 		if update.Message == nil {
@@ -83,7 +93,7 @@ func (b *Bot) Run() {
 			b.send(update.Message.Chat.ID, "Доступ запрещён.")
 			continue
 		}
-		b.handleMessage(update.Message)
+		go b.handleMessage(update.Message)
 	}
 }
 
@@ -202,7 +212,7 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 			return
 		}
 		st.History = append(st.History, ai.Msg{
-			Role:    "system",
+			Role:    "user",
 			Content: "Ошибка валидации: " + errMsg + ". Уточни у пользователя.",
 		})
 		b.states.Set(userID, st)
@@ -222,7 +232,7 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 	}
 
 	bal := b.effectiveBalance()
-	b.setPending(userID, &pendingConfirm{rows: rows, curBal: bal})
+	b.setPending(userID, &pendingConfirm{rows: rows, curBal: bal, createdAt: time.Now()})
 
 	m := tgbotapi.NewMessage(chatID, formatPreview(rows, bal))
 	m.ReplyMarkup = confirmKeyboard()
@@ -245,9 +255,13 @@ func (b *Bot) buildRows(vf validatedFields, year int) ([]distribution.Distributi
 			outstanding[id] = computeOutstanding(b.cfg.ContributionAmounts[id], alreadyPaid[id])
 		}
 
+		nextYearPaid, err := db.GetOutstanding(b.db, vf.Plot, year+1)
+		if err != nil {
+			return nil, fmt.Errorf("get next year outstanding: %w", err)
+		}
 		nextYearDue := make(map[string]float64, len(priorities))
 		for _, id := range priorities {
-			nextYearDue[id] = b.cfg.ContributionAmounts[id]
+			nextYearDue[id] = computeOutstanding(b.cfg.ContributionAmounts[id], nextYearPaid[id])
 		}
 
 		return distribution.ComputeDistribution(
@@ -295,6 +309,11 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		p := b.getPending(userID)
 		if p == nil {
 			b.send(chatID, "Нет ожидающей операции.")
+			return
+		}
+		if time.Since(p.createdAt) > time.Duration(b.cfg.StateTimeoutMinutes)*time.Minute {
+			b.clearPending(userID)
+			b.send(chatID, "Операция устарела. Пожалуйста, введите заново.")
 			return
 		}
 
@@ -356,6 +375,7 @@ func (b *Bot) handleBalanceN(chatID, userID int64, text string) {
 		sb.WriteString(fmt.Sprintf("🏡 Участок: %s\n", op.Plot))
 		sb.WriteString(fmt.Sprintf("👥 Членство: %s\n", op.Membership))
 		sb.WriteString(fmt.Sprintf("💳 Тип платежа: %s\n", op.PaymentType))
+		sb.WriteString(fmt.Sprintf("📊 Баланс после: %.2f руб.\n", op.BalanceAfter))
 	}
 
 	b.states.Clear(userID)
@@ -436,12 +456,12 @@ func (b *Bot) validateFields(f ai.Fields) (validatedFields, string) {
 		return validatedFields{}, "сумма должна быть положительной"
 	}
 	if f.Direction != nil && *f.Direction == "приход" &&
-		b.cfg.Limits.MaxPaymentAmount > 0 &&
-		amount > b.cfg.Limits.MaxPaymentAmount {
-		delta := amount - b.cfg.Limits.MaxPaymentAmount
+		b.cfg.MaxPaymentAmount > 0 &&
+		amount > b.cfg.MaxPaymentAmount {
+		delta := amount - b.cfg.MaxPaymentAmount
 		return validatedFields{}, fmt.Sprintf(
 			"сумма %.0f руб. превышает максимум за год %.0f руб.; верните плательщику %.0f руб. сдачи",
-			amount, b.cfg.Limits.MaxPaymentAmount, delta,
+			amount, b.cfg.MaxPaymentAmount, delta,
 		)
 	}
 	if f.PaymentType == nil || !contains(b.cfg.PaymentTypes, *f.PaymentType) {
@@ -569,9 +589,9 @@ func formatPreview(rows []distribution.DistributionRow, curBal float64) string {
 		sb.WriteString(fmt.Sprintf("📂 Категория: %s\n", r.ContributionID))
 		sb.WriteString(fmt.Sprintf("%s Направление: %s\n", dirEmoji, r.Direction))
 		sb.WriteString(fmt.Sprintf("💰 Сумма: %.2f руб.\n", r.Amount))
-		sb.WriteString(fmt.Sprintf("📅 Год: %d\n", r.FiscalYear))
 		sb.WriteString(fmt.Sprintf("🏡 Участок: %s\n", r.Plot))
 		sb.WriteString(fmt.Sprintf("👥 Членство: %s\n", r.Membership))
+		sb.WriteString(fmt.Sprintf("💳 Тип платежа: %s\n", r.PaymentType))
 		sb.WriteString(fmt.Sprintf("📊 Баланс после: %.2f руб.\n", bal))
 	}
 	sb.WriteString(fmt.Sprintf("\n💳 Итоговый баланс: %.2f руб.", bal))

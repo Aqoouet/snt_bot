@@ -146,6 +146,13 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 			} `json:"message"`
 		} `json:"choices"`
 	}
+	if res.StatusCode != http.StatusOK {
+		snippet := string(raw)
+		if len(snippet) > 300 {
+			snippet = snippet[:300]
+		}
+		return Response{}, fmt.Errorf("bad completions response (HTTP %d): %s", res.StatusCode, snippet)
+	}
 	if err := json.Unmarshal(raw, &outer); err != nil || len(outer.Choices) == 0 {
 		return Response{}, fmt.Errorf("bad completions response (HTTP %d)", res.StatusCode)
 	}

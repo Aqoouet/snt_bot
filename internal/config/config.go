@@ -13,10 +13,6 @@ type ContributionType struct {
 	PayerType string `json:"payer_type"`
 }
 
-type Limits struct {
-	MaxPaymentAmount float64 `json:"EXAMPLE_YEAR_TOTAL"`
-}
-
 type Config struct {
 	TelegramBotToken               string             `json:"TELEGRAM_BOT_TOKEN"`
 	TelegramAllowedUserIDs         []int64            `json:"TELEGRAM_ALLOWED_USER_IDS"`
@@ -34,7 +30,7 @@ type Config struct {
 	ContributionPriorityMember     []string           `json:"CONTRIBUTION_PRIORITY_MEMBER"`
 	ContributionPriorityIndividual []string           `json:"CONTRIBUTION_PRIORITY_INDIVIDUAL"`
 	ContributionAmounts            map[string]float64 `json:"CONTRIBUTION_AMOUNTS"`
-	Limits                         Limits             `json:"TEST_FIXTURES"`
+	MaxPaymentAmount               float64            `json:"MAX_PAYMENT_AMOUNT"`
 }
 
 func Load(path string) (*Config, error) {
@@ -70,6 +66,21 @@ func (c *Config) validate() error {
 	}
 	if c.OpenAIModel == "" {
 		return fmt.Errorf("OPENAI_MODEL is required")
+	}
+	if len(c.CategoriesIncome) == 0 {
+		return fmt.Errorf("CATEGORIES_INCOME is required")
+	}
+	if len(c.CategoriesExpense) == 0 {
+		return fmt.Errorf("CATEGORIES_EXPENSE is required")
+	}
+	if len(c.PaymentTypes) == 0 {
+		return fmt.Errorf("PAYMENT_TYPES is required")
+	}
+	if len(c.PlotMembershipMap) == 0 {
+		return fmt.Errorf("PLOT_MEMBERSHIP is required")
+	}
+	if len(c.ContributionAmounts) == 0 {
+		return fmt.Errorf("CONTRIBUTION_AMOUNTS is required")
 	}
 	return nil
 }
