@@ -101,7 +101,7 @@ func (c *Client) callRaw(ctx context.Context, sysPrompt string, history []Msg) (
 	payload := chatCompletionReq{
 		Model:       c.model,
 		Messages:    messages,
-		MaxTokens:   5000,
+		MaxTokens:   8000,
 		Temperature: 0.1,
 		TopK:        20,
 		TopP:        0.95,

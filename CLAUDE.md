@@ -1,5 +1,12 @@
 # CLAUDE.md — snt-bot
 
+## Read First
+
+Before planning, coding, testing, or deploying, read:
+
+- `SPEC_v2.md` — current product + architecture spec
+- `DEPLOY_NOTES.md` — current deploy/runtime/ops notes
+
 ## AI Endpoint (Remote 35B)
 
 Remote endpoint: `http://10.8.0.4:8181` — Qwen3.6-35B-A3B-Q4_K_M (llama.cpp, WireGuard network).
@@ -50,3 +57,4 @@ go test -v ./tests/ -run TestDistribution
 - `prompts/extraction_agent.md` — system prompt for AI extraction layer. Contains `{{PLACEHOLDERS}}` injected at runtime by Go.
 - `.env` — JSON config with canonical lists (PLOTS, PAYMENT_TYPES, CATEGORIES_INCOME, CATEGORIES_EXPENSE, etc.).
 - `SPEC_v2.md` — full architecture specification.
+- `DEPLOY_NOTES.md` — current deployment, systemd, endpoint, and verification notes.

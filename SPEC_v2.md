@@ -1,468 +1,452 @@
-# SNT Finance Bot — SPEC v2 (Conversational AI Architecture)
+# SNT Finance Bot — SPEC v2
 
-Replaces SPEC v1. All domain logic preserved. Architecture paradigm changed: multi-step FSM → conversational AI extraction + deterministic Go processing.
-
----
-
-## 1. Goals & Scope
-
-- Collect SNT financial operations via Telegram in structured form.
-- Store operations in **SQLite** (source of truth).
-- Maintain one global running balance across all operations.
-- Produce **CSV only via Export** scenario.
-- Use **OpenAI-compatible API** for conversational field extraction.
+Kill v1 FSM. Keep domain logic. New shape: chat AI extract -> Go verify/process.
 
 ---
 
-## 2. Architecture Overview
+## 1. Goal
 
-Two strictly separated layers:
+- Telegram bot collect SNT finance ops.
+- SQLite = truth.
+- One global running balance.
+- CSV only via **Export**.
+- Use OpenAI-compat API for field extraction.
 
-```
-User message
-     ↓
-┌─────────────────────────────────┐
-│  AI EXTRACTION LAYER (Go+LLM)  │
-│  - multi-turn conversation      │
-│  - fuzzy→canonical mapping      │
-│  - outputs: structured JSON     │
-│  - status: extracting/ready/    │
-│            abort                │
-└───────────────┬─────────────────┘
-                │ status=ready → Go shows confirmation UI
-                │ user confirms
-                ↓
-┌─────────────────────────────────┐
-│  DETERMINISTIC GO LAYER        │
-│  - validates struct             │
-│  - runs distribution algorithm  │
-│  - writes N rows to SQLite      │
-│  - returns summary text         │
-└─────────────────────────────────┘
+## 2. Arch
+
+Two layers. Hard split.
+
+```text
+user msg
+  ↓
+AI extract layer
+- multi-turn chat
+- fuzzy -> canonical
+- JSON out
+- status: extracting | ready | abort
+  ↓ ready
+Go confirm UI
+  ↓ confirm
+Deterministic Go layer
+- validate struct
+- run distribution
+- write N SQLite rows
+- return summary
 ```
 
-**Hard rule:** AI never writes to DB directly. AI never executes scripts. AI outputs a validated field struct; Go owns all writes.
+Hard rule:
+- AI never touch DB.
+- AI never run scripts.
+- AI only emit field struct.
+- Go own all writes.
 
----
+## 3. OpenAI-Compat Sufficiency
 
-## 3. OpenAI-Compatible API — Sufficiency Assessment
+Need / support / note:
 
-| Feature needed | OpenAI-compat support | Notes |
-|---|---|---|
-| Multi-turn conversation (messages array) | ✅ universal | Go maintains message history per user session |
-| JSON structured output | ✅ via `json_object` mode | Same fallback chain as `report_checking` |
-| System prompt injection | ✅ universal | Config values injected at runtime |
-| Tool calls / function calling | ❌ not required | We use JSON response protocol instead |
-| Streaming | ❌ not needed | Single response per turn |
+- multi-turn msgs / yes / Go keep per-user history
+- JSON output / yes / use `json_object`
+- system prompt / yes / inject runtime config
+- tool calls / no need / JSON protocol enough
+- streaming / no need / one resp per turn
 
-**Conclusion: existing OpenAI-compatible infrastructure is sufficient.** No new API features required. The `json_schema → json_object → no-format` fallback chain from `report_checking` applies here unchanged.
+Conclusion: current OpenAI-compat infra enough. Keep `report_checking` fallback chain:
 
-**Model requirement:** Must reliably produce structured JSON AND handle multi-turn context AND do fuzzy canonical matching. GPT-4o, GPT-4-turbo, Claude-via-proxy all qualify. Weak/small models risk JSON schema drift — note in deployment docs.
+1. `json_schema`
+2. `json_object`
+3. raw text -> extract JSON
 
----
+Model must:
+- hold multi-turn ctx
+- output stable JSON
+- do fuzzy canonical match
 
-## 4. Fields & Semantics
+Good: GPT-4o, GPT-4-turbo, Claude-via-proxy. Small/weak model -> schema drift risk. Note in deploy doc.
 
-Operation record fields (order in CSV):
+## 4. Fields
 
-**Членство · Дата · Приход · Расход · Тип платежа · Участок · Категория · Остаток · Примечание**
+CSV order:
 
-| Field | Source | Values |
-|---|---|---|
-| `Членство` | Auto-computed from plot | `Член` / `Индивидуал` / `-` |
-| `Дата` | User input | `DD.MM.YYYY` |
-| `Приход` / `Расход` | User input | positive amount or empty |
-| `Тип платежа` | User input → AI canonical | from `PAYMENT_TYPES` in `.env` |
-| `Участок` | User input → AI canonical | from `PLOTS` in `.env` |
-| `Категория` | User input → AI canonical | from `CATEGORIES_INCOME` or `CATEGORIES_EXPENSE` |
-| `Остаток` | Computed | running balance after operation |
-| `Примечание` | User input | free text |
+`Членство · Дата · Приход · Расход · Тип платежа · Участок · Категория · Остаток · Примечание`
 
----
+Field map:
 
-## 5. Payer Groups & Contribution Logic
+- `Членство`: auto from plot. `Член` / `Индивидуал` / `-`
+- `Дата`: user, `DD.MM.YYYY`
+- `Приход` / `Расход`: user, positive amount or empty
+- `Тип платежа`: user -> AI canonical from `PAYMENT_TYPES`
+- `Участок`: user -> AI canonical from `PLOTS`
+- `Категория`: user -> AI canonical from `CATEGORIES_INCOME` or `CATEGORIES_EXPENSE`
+- `Остаток`: computed running balance after op
+- `Примечание`: free text
 
-### 5.1 Payer Types
+## 5. Payers + Contribution Logic
 
-- **Член СНТ** — legal member.
-- **Садовод-индивидуал** — non-member, equivalent payment structure.
-- Type derived from `PLOT_MEMBERSHIP` dict in `.env`.
+### 5.1 Payer type
 
-### 5.2 Contribution Identifiers
+- `Член СНТ` = legal member
+- `Садовод-индивидуал` = non-member, same payment shape
+- derive from `.env` `PLOT_MEMBERSHIP`
 
-Stored in `CONTRIBUTION_TYPES` in `.env`:
+### 5.2 Contribution IDs
 
-- Members: `MEMBER_REGULAR`, `TARGET_ROAD`, `TARGET_FLOOD`, `TARGET_DITCH`
-- Individuals: `INDIV_CURRENT`, `TARGET_ROAD`, `TARGET_FLOOD`, `TARGET_DITCH`
+In `.env` `CONTRIBUTION_TYPES`:
 
-### 5.3 Payment Distribution Priority
+- members: `MEMBER_REGULAR`, `TARGET_ROAD`, `TARGET_FLOOD`, `TARGET_DITCH`
+- individuals: `INDIV_CURRENT`, `TARGET_ROAD`, `TARGET_FLOOD`, `TARGET_DITCH`
 
-- Member: `CONTRIBUTION_PRIORITY_MEMBER` array in `.env`
-- Individual: `CONTRIBUTION_PRIORITY_INDIVIDUAL` array in `.env`
-- Waterfall: pay top priority first, remainder to next.
-- Partial payment → partial allocation row.
-- Overpayment beyond current year → advance to next year, same priority order, additional rows.
+### 5.3 Distribution priority
 
----
+- member order: `CONTRIBUTION_PRIORITY_MEMBER`
+- individual order: `CONTRIBUTION_PRIORITY_INDIVIDUAL`
+- waterfall: pay top debt first, then next
+- partial pay -> partial row
+- overpay current year -> push next year, same priority, extra rows
 
-## 6. Tech Stack
+## 6. Stack
 
-| Component | Choice |
-|---|---|
-| Language | Go |
-| Telegram API | `go-telegram-bot-api/v5` |
-| Storage | SQLite |
-| AI client | HTTP client to OpenAI-compatible API (base URL, model, key from `.env`) |
-| Conversation state | In-memory map `userID → ConversationState` (message history + partial fields) |
-| System prompt | Single file `prompts/extraction_agent.md` (replaces per-field prompts) |
-| Per-field prompts | Removed — absorbed into extraction agent system prompt |
+- Go
+- Telegram: `go-telegram-bot-api/v5`
+- SQLite
+- AI client: HTTP -> OpenAI-compat (`base URL`, `model`, `key` from `.env`)
+- state: in-memory `userID -> ConversationState`
+- system prompt: `prompts/extraction_agent.md`
+- per-field prompts: gone
 
----
+## 7. Security
 
-## 7. Security & Access
+- allowlist `telegram user_id` in `.env`
+- unknown user -> short reject, no internals
+- no admin user-mgmt cmds; edit `.env` + restart
 
-- Allowlist of `telegram user_id` in `.env`.
-- Any message from unknown user: short rejection, no internals exposed.
-- No admin commands for user management — edit `.env` + restart.
+## 8. Telegram UI
 
----
+### 8.1 Main menu
 
-## 8. Telegram UI & Navigation
+Reply kb 2x2:
 
-### 8.1 Main Menu (always present)
+- `Добавить операцию`
+- `Баланс`
+- `Экспорт`
+- `Отмена`
 
-Reply keyboard 2×2:
+### 8.2 Cancel
 
-| | Left | Right |
-|---|---|---|
-| Top | **Добавить операцию** | **Баланс** |
-| Bottom | **Экспорт** | **Отмена** |
+Anywhere: `Отмена` -> wipe convo state -> main menu.
 
-### 8.2 Cancel semantics
+### 8.3 Lists
 
-**At any point** in any flow: **Отмена** → wipe conversation state → return to main menu 2×2.
+Never dump full categories/payment types/plots in chat. AI resolves via convo.
 
-### 8.3 Lists not shown in chat
+## 9. Add Operation Flow
 
-Categories, payment types, plots — **never** shown as full lists. AI resolves them conversationally.
-
----
-
-## 9. Add Operation Flow (Conversational)
-
-Replaces v1 §7 FSM entirely.
+Replaces v1 FSM.
 
 ### 9.1 Entry
 
-User taps **Добавить операцию** → Go initializes `ConversationState` for user → sends opening prompt to AI extraction layer → forwards AI's first question to user.
+User taps `Добавить операцию` -> Go init `ConversationState` -> send opening ctx to AI -> forward AI first question.
 
-### 9.2 Conversation loop
+### 9.2 Loop
 
-```
-while state != ready AND state != abort:
-    receive user message
-    if message == "Отмена":
-        clear state, return to main menu
-    append message to conversation history
-    call AI extraction layer
-    parse AI response JSON
-    if status == "extracting":
-        send AI's message to user, continue loop
-    if status == "ready":
-        show confirmation UI (see §9.3)
-    if status == "abort":
-        clear state, return to main menu with explanation
+```text
+while status != ready && status != abort
+  get user msg
+  if "Отмена" -> clear state, main menu
+  append history
+  call AI
+  parse JSON
+  extracting -> send AI msg, continue
+  ready -> show confirm UI
+  abort -> clear state, main menu + reason
 ```
 
-### 9.3 Confirmation step (Go-owned, not AI)
+### 9.3 Confirm step
 
-When AI signals `status: "ready"`, Go (not AI):
-1. Calls `ComputeDistribution(fields)` — **dry run, no DB writes** (see §11.1).
-2. Renders full preview of all N rows that will be written:
-   - Per row: contribution ID, amount, fiscal_year, membership, plot.
-   - Total rows count.
-   - Projected global balance after commit.
-3. Shows inline buttons: **✓ Подтвердить** / **✗ Отмена**.
-4. On confirm → call `CommitDistribution(rows)` (see §11.2) — atomic DB write.
-5. On cancel → clear state, return to main menu. No DB touched.
+When AI returns `ready`, Go owns next step:
 
-This step is intentionally outside AI. User sees the exact DB change before it happens.
+1. run `ComputeDistribution(fields)` dry-run, no DB write
+2. render full preview of all rows:
+   - each row: contribution ID, amount, fiscal year, membership, plot
+   - total row count
+   - projected global balance after commit
+3. show inline buttons: `✓ Подтвердить` / `✗ Отмена`
+4. confirm -> `CommitDistribution(rows)` atomic write
+5. cancel -> clear state, main menu, no DB touch
 
-### 9.4 After successful Add
+User must see exact DB change before commit.
 
-Text message only:
-- Brief field summary.
-- Current global balance after write.
-- No CSV attachment.
+### 9.4 Success reply
 
----
+Text only:
 
-## 10. AI Extraction Layer
+- short field summary
+- current global balance
+- no CSV
 
-### 10.1 Conversation state (per user)
+## 10. AI Extract Layer
 
-```
+### 10.1 Per-user state
+
+```text
 ConversationState {
-    messages:      []ChatMessage    // full history sent to API each turn
-    partialFields: OperationFields  // accumulated so far (nullable per field)
+  messages: []ChatMessage
+  partialFields: OperationFields
 }
 ```
 
-History is ephemeral (in-memory). Cleared on: confirm, cancel, timeout.
+Ephemeral. Clear on confirm, cancel, timeout.
 
-### 10.2 System prompt (`prompts/extraction_agent.md`)
+### 10.2 System prompt
 
-Injected once as `role: system`. Contains:
+`prompts/extraction_agent.md`, injected once as system msg. Contains:
 
-1. **Role**: "You are an SNT finance bot assistant. Extract operation fields from user messages."
-2. **Valid values**: All canonical lists from `.env` injected at runtime — payment types, plots, categories (income + expense), membership dict. Same injection pattern as v1 prompts.
-3. **Field definitions**: date format, direction enum, amount rules, what each field means.
-4. **Conversation rules**:
-   - Ask only about missing or ambiguous fields.
-   - If user provides multiple fields in one message, extract all at once.
-   - On ambiguous canonical match: propose the closest match and ask user to confirm it.
-   - Never ask for `Членство` — it is computed, not user-input.
-5. **Output schema**: Always respond with JSON (see §10.3).
+1. role: SNT finance bot extractor
+2. canonical values from `.env`: payment types, plots, categories, membership map
+3. field defs: date, direction, amount, meaning
+4. convo rules:
+   - ask only missing/ambiguous fields
+   - if one user msg gives many fields, extract all
+   - if fuzzy match ambiguous, propose closest + ask confirm
+   - never ask `Членство`; Go computes it
+5. output schema below
 
-### 10.3 AI response JSON schema
-
-Every AI response must be valid JSON:
+### 10.3 AI JSON schema
 
 ```json
 {
-  "status": "extracting" | "ready" | "abort",
-  "message": "string — text to display to user",
+  "status": "extracting | ready | abort",
+  "message": "text for user",
   "fields": {
-    "date":         "DD.MM.YYYY" | null,
-    "direction":    "приход" | "расход" | null,
-    "amount":       123.45 | null,
-    "payment_type": "<canonical>" | null,
-    "plot":         "<canonical>" | null,
-    "category":     "<canonical>" | null,
-    "note":         "string" | null
+    "date": "DD.MM.YYYY | null",
+    "direction": "приход | расход | null",
+    "amount": "number | null",
+    "payment_type": "canonical | null",
+    "plot": "canonical | null",
+    "category": "canonical | null",
+    "note": "string | null"
   }
 }
 ```
 
-- `status: "extracting"` — still gathering. `message` = next question to user. `fields` = whatever confirmed so far.
-- `status: "ready"` — all fields confirmed and canonicalized. `fields` = complete. `message` = summary (Go may override display).
-- `status: "abort"` — user expressed desire to cancel or irrecoverable ambiguity. `message` = reason.
+Meaning:
 
-### 10.4 Response parsing fallback chain
+- `extracting`: still gather; `message` = next question; `fields` = confirmed so far
+- `ready`: all fields done; `fields` complete; `message` can be summary
+- `abort`: user wants cancel or ambiguity hopeless; `message` = reason
+
+### 10.4 Parse fallback
 
 Same as `report_checking`:
-1. Try `json_schema` response format.
-2. Fall back to `json_object`.
-3. Fall back to no format → extract JSON block from text.
 
-If all fail → treat as `extracting` with generic retry message.
+1. `json_schema`
+2. `json_object`
+3. raw text -> extract JSON
 
-### 10.5 Go validation after `status: "ready"`
+All fail -> treat as `extracting` with generic retry msg.
 
-Before showing confirmation UI, Go validates the AI-returned struct:
-- `date` parses as `DD.MM.YYYY`.
-- `direction` ∈ {приход, расход}.
-- `amount > 0`.
-- `payment_type` ∈ `PAYMENT_TYPES`.
-- `plot` ∈ `PLOTS`.
-- `category` ∈ correct list for direction.
-- All fields non-null.
+### 10.5 Go validate after `ready`
 
-If validation fails → inject error back into conversation as system message, continue loop. AI does not access DB or `.env` directly — Go validates against in-memory config.
+Before confirm UI, Go checks:
 
----
+- `date` parses as `DD.MM.YYYY`
+- `direction` in `{приход, расход}`
+- `amount > 0`
+- `payment_type` in `PAYMENT_TYPES`
+- `plot` in `PLOTS`
+- `category` in correct list for direction
+- all fields non-null
+
+Fail -> inject validation error back as system msg, continue convo.
+
+AI never read DB or `.env` direct. Go validates vs in-memory config.
 
 ## 11. Deterministic Go Layer
 
-Never called by AI directly. Two distinct phases, called separately.
+AI never call direct.
 
-### 11.1 `ComputeDistribution(fields) → []DistributionRow`
+### 11.1 `ComputeDistribution(fields) -> []DistributionRow`
 
-**Pure function. No DB writes. Called before confirmation.**
+Pure fn. No DB write. Called before confirm.
 
-1. Look up `membership` from `PLOT_MEMBERSHIP[plot]`.
-2. Read outstanding debts per contribution type for this plot/fiscal_year from DB (read-only).
-3. Run waterfall distribution algorithm (§5.3):
-   - Iterate priority list for payer type.
-   - For each contribution: allocate `min(remaining_payment, remaining_debt)`.
-   - If payment exceeds current year total → advance to next fiscal year, same priority.
-   - Each allocation = one `DistributionRow`.
-4. Return `[]DistributionRow` — the exact rows that would be written.
+Steps:
 
-`DistributionRow` fields: `contribution_id`, `amount`, `fiscal_year`, `membership`, `plot`, `payment_type`, `op_date`, `category`, `note`, `projected_balance_after`.
+1. find `membership` from `PLOT_MEMBERSHIP[plot]`
+2. read outstanding debts for plot/fiscal year from DB, read-only
+3. run waterfall:
+   - walk payer priority list
+   - alloc `min(remaining_payment, remaining_debt)`
+   - if payment > current-year total, move next fiscal year, same priority
+   - each alloc = one row
+4. return exact rows that would be written
 
-Used by §9.3 to render preview. Idempotent — safe to call multiple times.
+`DistributionRow`:
+- `contribution_id`
+- `amount`
+- `fiscal_year`
+- `membership`
+- `plot`
+- `payment_type`
+- `op_date`
+- `category`
+- `note`
+- `projected_balance_after`
 
-### 11.2 `CommitDistribution(rows []DistributionRow) → error`
+Used for preview. Idempotent. Safe many calls.
 
-**Called only after user confirms. Writes to DB.**
+### 11.2 `CommitDistribution(rows []DistributionRow) -> error`
 
-1. Open DB transaction.
-2. Insert all rows from `[]DistributionRow`.
-3. Set `payment_group_id` UUID (same for all rows in this call).
-4. Set `balance_after` on each row (final, not projected).
-5. Commit. On error → rollback, return error to caller.
-6. Return summary struct.
+Only after confirm. Writes DB.
+
+1. open tx
+2. insert all rows
+3. set one shared `payment_group_id` UUID
+4. set final `balance_after` per row
+5. commit; on err rollback
+6. return summary struct
 
 ### 11.3 Output
 
-Summary struct → Go formats as text → sent to user.
+Go formats summary text -> send user.
 
----
+## 12. Balance Flow
 
-## 12. Balance Scenario
+1. user taps `Баланс`
+2. bot asks N = last ops count
+3. user sends int N
+4. bot replies text only:
+   - current global balance
+   - aggregate income/expense
+   - last N ops: date, direction, amount, plot, category, membership
+5. no AI
 
-1. User taps **Баланс**.
-2. Bot asks: enter N (number of last operations).
-3. User enters integer N.
-4. Bot responds (text only):
-   - Current global balance.
-   - Aggregate income / expense totals.
-   - Last N operations as text (date, direction, amount, plot, category, membership).
-5. No AI involved in this flow.
+## 13. Export CSV Flow
 
----
+1. user taps `Экспорт`
+2. bot asks N = last row count
+3. user sends int N; if `N >= total`, export all
+4. bot sends `.csv`
+5. no AI
 
-## 13. Export CSV Scenario
+### 13.1 CSV format
 
-1. User taps **Экспорт**.
-2. Bot asks: enter N (number of last rows).
-3. User enters integer N. If N ≥ total rows → export all.
-4. Bot sends `.csv` file.
-5. No AI involved.
-
-### 13.1 CSV Format
-
-- UTF-8 with BOM.
-- Column order: `Членство, Дата, Приход, Расход, Тип платежа, Участок, Категория, Остаток, Примечание`.
-- Sort: oldest → newest (for easy append into spreadsheet).
-
----
+- UTF-8 BOM
+- columns:
+  `Членство, Дата, Приход, Расход, Тип платежа, Участок, Категория, Остаток, Примечание`
+- sort oldest -> newest
 
 ## 14. Global Balance
 
-- One numeric global balance across all operations.
-- `balance_after` stored per row = running sum through all prior rows.
-- Initial value from `INITIAL_BALANCE` in `.env`.
-- Displayed in: Balance scenario and post-Add summary.
-
----
+- one numeric global balance across all ops
+- `balance_after` per row = running sum through all prior rows
+- initial from `.env` `INITIAL_BALANCE`
+- shown in Balance flow + post-add summary
 
 ## 15. Data Model
 
-Table `operations` (each row = one contribution allocation chunk):
+Table `operations`. One row = one contribution allocation chunk.
 
-| Field | Type | Notes |
-|---|---|---|
-| `id` | INTEGER PK | Autoincrement |
-| `created_at` | TIMESTAMP | UTC |
-| `membership` | TEXT | Член / Индивидуал / - |
-| `op_date` | TEXT | DD.MM.YYYY |
-| `direction` | TEXT | приход / расход |
-| `amount` | REAL | Amount for this specific contribution chunk |
-| `payment_type` | TEXT | Canonical |
-| `plot` | TEXT | Canonical |
-| `fiscal_year` | INTEGER | Year this chunk applies to |
-| `category` | TEXT | Contribution ID or expense category |
-| `note` | TEXT | Shared across all chunks of one payment |
-| `balance_after` | REAL | Running balance after this row |
-| `payment_group_id` | TEXT | UUID — groups all rows from one user payment |
+- `id`: INTEGER PK autoincrement
+- `created_at`: TIMESTAMP UTC
+- `membership`: TEXT (`Член` / `Индивидуал` / `-`)
+- `op_date`: TEXT `DD.MM.YYYY`
+- `direction`: TEXT (`приход` / `расход`)
+- `amount`: REAL for this chunk
+- `payment_type`: TEXT canonical
+- `plot`: TEXT canonical
+- `fiscal_year`: INTEGER target year
+- `category`: TEXT contribution ID or expense category
+- `note`: TEXT shared across payment chunks
+- `balance_after`: REAL running balance after row
+- `payment_group_id`: TEXT UUID, groups rows from one user payment
 
-`payment_group_id` is new vs v1. Groups rows for Balance summary display.
+New vs v1: `payment_group_id`.
 
-Indexes: `op_date`, `created_at`, `(plot, fiscal_year)`.
+Indexes:
+- `op_date`
+- `created_at`
+- `(plot, fiscal_year)`
 
----
+## 16. `.env` JSON Config
 
-## 16. `.env` Configuration (JSON)
+- `TELEGRAM_BOT_TOKEN`: bot token
+- `TELEGRAM_ALLOWED_USER_IDS`: allowed Telegram IDs array
+- `INITIAL_BALANCE`: starting balance
+- `OPENAI_BASE_URL`: AI API base URL
+- `OPENAI_API_KEY`: AI key
+- `OPENAI_MODEL`: model name
+- `CATEGORIES_INCOME`: income categories
+- `CATEGORIES_EXPENSE`: expense categories
+- `PAYMENT_TYPES`: payment types
+- `PLOTS`: plot IDs
+- `PLOT_MEMBERSHIP`: plot -> `Член` / `Индивидуал` / `-`
+- `CONTRIBUTION_TYPES`: array of `{id, name, payer_type}`
+- `CONTRIBUTION_PRIORITY_MEMBER`: ordered member contribution IDs
+- `CONTRIBUTION_PRIORITY_INDIVIDUAL`: ordered individual contribution IDs
+- `CONTRIBUTION_AMOUNTS`: `{contribution_id: amount}` annual charge map
+- `DB_FILE`: SQLite path
+- `STATE_TIMEOUT_MINUTES`: convo TTL
+- `TEST_FIXTURES`: test amounts/object
 
-| Key | Purpose |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Bot token |
-| `TELEGRAM_ALLOWED_USER_IDS` | Array of allowed `telegram user_id` |
-| `INITIAL_BALANCE` | Starting balance |
-| `OPENAI_BASE_URL` | AI API base URL |
-| `OPENAI_API_KEY` | AI API key |
-| `OPENAI_MODEL` | Model name |
-| `CATEGORIES_INCOME` | Array of income category strings |
-| `CATEGORIES_EXPENSE` | Array of expense category strings |
-| `PAYMENT_TYPES` | Array of payment type strings |
-| `PLOTS` | Array of plot identifiers |
-| `PLOT_MEMBERSHIP` | Object: plot → `Член` / `Индивидуал` / `-` |
-| `CONTRIBUTION_TYPES` | Array of `{id, name, payer_type}` |
-| `CONTRIBUTION_PRIORITY_MEMBER` | Ordered array of contribution IDs for members |
-| `CONTRIBUTION_PRIORITY_INDIVIDUAL` | Ordered array of contribution IDs for individuals |
-| `CONTRIBUTION_AMOUNTS` | Object: `{contribution_id: amount}` — annual charge per contribution type |
-| `DB_FILE` | SQLite file path |
-| `STATE_TIMEOUT_MINUTES` | Conversation state TTL |
-| `TEST_FIXTURES` | Object with test amounts (see §17) |
+New vs v1: `CONTRIBUTION_AMOUNTS`. Needed for debt math.
 
-`CONTRIBUTION_AMOUNTS` is new vs v1 — required by distribution algorithm to compute debt per contribution per payer per year.
+## 17. Non-Functional
 
----
+- log AI + Telegram errs; no secret leak
+- one active `ConversationState` per user
+- new `Добавить операцию` while state alive -> warn, overwrite
+- DB writes always transactional
+- clear history on confirm, cancel, timeout (`STATE_TIMEOUT_MINUTES`)
+- AI timeout configurable, default `180s`; retry once, then user-facing err
 
-## 17. Non-Functional Requirements
+## 18. Tests
 
-- Log AI errors and Telegram errors without leaking secrets.
-- One active `ConversationState` per user. New **Добавить операцию** tap while state exists: warn user, overwrite state.
-- DB writes always transactional — partial distribution never committed.
-- Conversation history cleared on: confirm, cancel, timeout (`STATE_TIMEOUT_MINUTES`).
-- AI response timeout: configurable, default 180s; on timeout retry once, then show user error message.
+Distribution algo tests: 20 cases, same as v1 §14. Only deterministic Go layer. AI independent.
 
----
+Inputs from `.env` `TEST_FIXTURES`:
 
-## 18. Tests & Verification Scenarios
+- `TEST_FIXTURES.EXAMPLE_DUE_MEMBER`
+- `TEST_FIXTURES.EXAMPLE_DUE_INDIVIDUAL`
+- `TEST_FIXTURES.PAYMENTS.*`
 
-Distribution algorithm test cases — **20 cases**, identical to SPEC v1 §14. These test the Deterministic Go Layer only, independent of AI.
+Cases 1-20 unchanged. Distribution contract unchanged. Only entry path changed: convo, not FSM.
 
-All inputs from `.env` `TEST_FIXTURES`:
-- `TEST_FIXTURES.EXAMPLE_DUE_MEMBER` — member annual charges by contribution ID
-- `TEST_FIXTURES.EXAMPLE_DUE_INDIVIDUAL` — individual annual charges by contribution ID
-- `TEST_FIXTURES.PAYMENTS.*` — payment amounts keyed by name
+## 19. v1 -> v2 Diff
 
-Cases 1–20 from v1 §14.1 are unchanged. Distribution contract is identical; only the entry path changed (conversational vs FSM).
+- field collection: 7-step FSM -> one AI convo loop
+- AI role: per-field validator -> full extractor
+- prompts: many files -> one system prompt
+- validation: inline per-step -> AI extract, Go validate before confirm
+- confirmation: implicit -> explicit Go-owned inline buttons
+- DB writes: FSM end -> only after user confirm
+- power user UX: always 7 prompts -> one msg can fill all
+- novice UX: forced step-by-step -> AI asks only gaps
+- distribution algo: unchanged
+- data model: add `payment_group_id`
+- config: add `CONTRIBUTION_AMOUNTS`
+- prompts dir: single `prompts/extraction_agent.md`
 
----
+## 20. Remote OpenAI-Compat Endpoint (35B)
 
-## 19. Key Differences from SPEC v1
+Prod-grade extraction test endpoint over WireGuard:
 
-| Aspect | v1 | v2 |
-|---|---|---|
-| Field collection | 7-step FSM, one field per step | Single conversational AI loop |
-| AI role | Per-field validator (3 fields only) | Full extraction agent for all fields |
-| Prompts | One file per field type | One system prompt, all fields |
-| Validation | Inline per-step | AI extracts → Go validates struct before confirm |
-| Confirmation | Implicit (last step completes) | Explicit inline button (Go-owned) |
-| DB writes | Triggered at FSM completion | Triggered only after user confirmation |
-| UX for power users | Always 7 prompts | One message can fill all fields |
-| UX for novices | Guided step-by-step | AI asks only about gaps |
-| Distribution algorithm | Deterministic Go | Unchanged |
-| Data model | No `payment_group_id` | `payment_group_id` UUID added |
-| Config new keys | — | `CONTRIBUTION_AMOUNTS` added |
-| Prompts directory | `prompts/*.md` per field | `prompts/extraction_agent.md` single file |
+- base URL: `http://10.8.0.4:8181`
+- backend: `llama.cpp` on `stressii-wg`
+- reach via SSH alias `hostkey_ru` + WireGuard
+- model: `Qwen3.6-35B-A3B-Q4_K_M.gguf`
 
----
+### Constraints
 
-## 21. Remote OpenAI-Compatible Endpoint (35B)
-
-For production-quality extraction testing, a remote endpoint is available over WireGuard network.
-
-- Base URL: `http://10.8.0.4:8181`
-- Backend: `llama.cpp` server on host `stressii-wg` (reachable via SSH host alias `hostkey_ru` + WireGuard)
-- Model: `Qwen3.6-35B-A3B-Q4_K_M.gguf`
-
-### Key constraints
-
-- This is a **Qwen3 thinking model** — internal reasoning cannot be disabled.
-- Always set `max_tokens >= 5000`. Model spends ~1000+ tokens on reasoning before producing output; lower values yield empty `content` with non-empty `reasoning_content`.
-- `finish_reason: "length"` with empty `content` = token budget exhausted during thinking. Increase `max_tokens`.
+- Qwen thinking model. Internal reasoning cannot disable.
+- Always use `max_tokens >= 5000`.
+- Model may burn `1000+` tokens thinking before final content.
+- `finish_reason: "length"` + empty `content` = budget died in thinking. Raise `max_tokens`.
 
 ### API paths
 
-- Models list: `GET /v1/models`
-- Chat completions: `POST /v1/chat/completions`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
 
-### Example test call
+### Example
 
 ```bash
 curl -s http://10.8.0.4:8181/v1/chat/completions \
@@ -471,15 +455,15 @@ curl -s http://10.8.0.4:8181/v1/chat/completions \
     "model": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
     "messages": [
       {"role": "system", "content": "<system prompt here>"},
-      {"role": "user", "content": "<user message here>"}
+      {"role": "user", "content": "<user msg here>"}
     ],
     "max_tokens": 5000
   }'
 ```
 
-### RTK proxy note
+### RTK note
 
-RTK intercepts plain `curl` output and replaces it with a schema template. Use `rtk proxy curl` to get raw JSON during testing:
+RTK may hijack plain `curl` output, swap schema template. For raw JSON:
 
 ```bash
 rtk proxy curl -s http://10.8.0.4:8181/v1/chat/completions ...

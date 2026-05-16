@@ -218,8 +218,13 @@ func (b *Bot) handlePlotExtraction(chatID, userID int64, text string) {
 		st = b.states.Get(userID)
 		st.PlotID = resp.Plot
 		st.History = filterUserMessages(st.History)
+		confirmMsg := fmt.Sprintf(
+			"Участок %s подтверждён. Укажите дату, направление (приход/расход), сумму, тип платежа и категорию.",
+			resp.Plot,
+		)
+		st.History = append(st.History, ai.Msg{Role: "assistant", Content: confirmMsg})
 		b.states.Set(userID, st)
-		b.handleAddingMain(chatID, userID, "")
+		b.send(chatID, confirmMsg)
 	default: // extracting
 		st = b.states.Get(userID)
 		st.History = append(st.History, ai.Msg{Role: "assistant", Content: resp.Message})
@@ -308,6 +313,7 @@ func (b *Bot) buildPaymentContext(plot, membership string, year int) string {
 	}
 
 	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Участок: %s (уже подтверждён — поле `plot` заполнено, не спрашивай его у пользователя)\n\n", plot))
 	sb.WriteString("## Контекст платежей участка\n\n")
 	sb.WriteString("| Категория | Лимит | Оплачено | Остаток |\n")
 	sb.WriteString("|---|---|---|---|\n")
@@ -355,9 +361,20 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 	rows, err := b.buildRows(vf, year)
 	if err != nil {
 		log.Printf("build rows user %d: %v", userID, err)
-		b.send(chatID, "Ошибка формирования операции: "+err.Error())
-		b.states.Clear(userID)
-		b.sendMenu(chatID, "")
+		st := b.states.Get(userID)
+		st.RetryCount++
+		if st.RetryCount >= 3 {
+			b.states.Clear(userID)
+			b.clearPending(userID)
+			b.sendMenu(chatID, "Не удалось сформировать операцию после нескольких попыток. Попробуйте снова.")
+			return
+		}
+		st.History = append(st.History, ai.Msg{
+			Role:    "user",
+			Content: "Системная ошибка: " + err.Error() + " Сообщи пользователю и попроси скорректировать сумму.",
+		})
+		b.states.Set(userID, st)
+		b.handleAddingMain(chatID, userID, "")
 		return
 	}
 
@@ -373,11 +390,16 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 }
 
 func (b *Bot) buildRows(vf validatedFields, year int) ([]distribution.DistributionRow, error) {
-	if vf.Direction == "приход" && vf.Membership != "-" {
+	// Waterfall distribution only when no explicit category given.
+	// If user stated a specific income category, treat as direct payment (may be prior-year debt).
+	if vf.Direction == "приход" && vf.Membership != "-" && vf.Category == "" {
 		dues := b.cfg.DuesFor(vf.Membership)
-		if _, ok := dues[vf.Category]; ok {
+		if len(dues) > 0 {
 			return b.buildDistributionRows(vf, year)
 		}
+	}
+	if vf.Category == "" {
+		return nil, fmt.Errorf("категория не указана")
 	}
 	return []distribution.DistributionRow{{
 		ContributionID: vf.Category,
@@ -402,13 +424,8 @@ func (b *Bot) buildDistributionRows(vf validatedFields, year int) ([]distributio
 	if err != nil {
 		return nil, fmt.Errorf("get outstanding current year: %w", err)
 	}
-	paidNext, err := db.GetOutstanding(b.db, vf.Plot, year+1)
-	if err != nil {
-		return nil, fmt.Errorf("get outstanding next year: %w", err)
-	}
 
 	outstanding := make(map[string]float64, len(dues))
-	nextYearDue := make(map[string]float64, len(dues))
 	for _, cat := range categories {
 		v := dues[cat]
 		priority, limit := v[0], v[1]
@@ -419,9 +436,18 @@ func (b *Bot) buildDistributionRows(vf validatedFields, year int) ([]distributio
 		if rem := effectiveLimit - paidCur[cat]; rem > 0 {
 			outstanding[cat] = rem
 		}
-		if rem := effectiveLimit - paidNext[cat]; rem > 0 {
-			nextYearDue[cat] = rem
-		}
+	}
+
+	// Overflow guard: amount must not exceed current-year remaining capacity.
+	var totalCapacity float64
+	for _, v := range outstanding {
+		totalCapacity += v
+	}
+	if vf.Amount > totalCapacity+0.005 {
+		return nil, fmt.Errorf(
+			"сумма %.0f руб. превышает остаток %.0f руб. за текущий год. Уточните сумму.",
+			vf.Amount, totalCapacity,
+		)
 	}
 
 	fields := distribution.OperationFields{
@@ -435,7 +461,7 @@ func (b *Bot) buildDistributionRows(vf validatedFields, year int) ([]distributio
 		Amount:      vf.Amount,
 	}
 
-	return distribution.ComputeDistribution(fields, outstanding, categories, year, nextYearDue)
+	return distribution.ComputeDistribution(fields, outstanding, categories, year, nil)
 }
 
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
@@ -586,13 +612,22 @@ func (b *Bot) validateFields(f ai.Fields) (validatedFields, string) {
 	if f.Plot == nil || !contains(b.cfg.Plots(), *f.Plot) {
 		return validatedFields{}, "недопустимый участок"
 	}
-	cats := b.cfg.CategoriesIncome
+	membership := b.cfg.PlotMembership(*f.Plot)
+
+	category := ""
 	if *f.Direction == "расход" {
-		cats = b.cfg.CategoriesExpense
+		if f.Category == nil || !contains(b.cfg.CategoriesExpense, *f.Category) {
+			return validatedFields{}, fmt.Sprintf("недопустимая категория для направления '%s'", *f.Direction)
+		}
+		category = *f.Category
+	} else {
+		// For income: category is optional — distribution handles allocation.
+		// If AI returned a category anyway, accept it if valid; otherwise ignore.
+		if f.Category != nil && contains(b.cfg.CategoriesIncome, *f.Category) {
+			category = *f.Category
+		}
 	}
-	if f.Category == nil || !contains(cats, *f.Category) {
-		return validatedFields{}, fmt.Sprintf("недопустимая категория для направления '%s'", *f.Direction)
-	}
+
 	note := ""
 	if f.Note != nil {
 		note = *f.Note
@@ -603,9 +638,9 @@ func (b *Bot) validateFields(f ai.Fields) (validatedFields, string) {
 		Amount:      amount,
 		PaymentType: *f.PaymentType,
 		Plot:        *f.Plot,
-		Category:    *f.Category,
+		Category:    category,
 		Note:        note,
-		Membership:  b.cfg.PlotMembership(*f.Plot),
+		Membership:  membership,
 	}, ""
 }
 

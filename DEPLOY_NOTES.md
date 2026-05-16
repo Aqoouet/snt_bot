@@ -1,46 +1,47 @@
 # Deploy Notes
 
-## Current deployment
+## Current deploy
 
-- Host: `hostkey_us`
-- Remote host name: `19455.example.us`
-- App directory: `/opt/snt-bot`
-- Service: `snt-bot`
-- Service unit: `/etc/systemd/system/snt-bot.service`
-- Working directory: `/opt/snt-bot`
-- Config path: `/opt/snt-bot/.env`
+- host: `hostkey_us`
+- remote name: `19455.example.us`
+- app dir: `/opt/snt-bot`
+- svc: `snt-bot`
+- unit: `/etc/systemd/system/snt-bot.service`
+- workdir: `/opt/snt-bot`
+- config: `/opt/snt-bot/.env`
 
 ## Runtime files
 
-The deployed runtime consists of:
+Deploy runtime =:
 
-- `snt-bot` binary (prompts embedded via `//go:embed`)
+- `snt-bot` binary
 - `.env`
 
-## Build and upload
+Prompt embedded by `//go:embed`. Keep `prompts/extraction_agent.md` in deploy artifact set if refresh process expects file copy too.
 
-> **The binary is built locally and committed to the repository. Do not compile on the server.**
-> The `snt-bot` linux/amd64 binary is tracked in git so the server only needs to receive the pre-built artifact.
+## Build + upload
 
-Build locally (cross-compile for linux/amd64):
+Rule: build local. Commit binary. Do not compile on server.
+
+Build linux/amd64:
 
 ```bash
 env GOCACHE="$PWD/.gocache" GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$PWD/snt-bot" ./
 ```
 
-Upload the binary and prompt, then restart:
+Upload binary + prompt, then restart:
 
 ```bash
 tar -czf - snt-bot prompts/extraction_agent.md | ssh hostkey_us 'mkdir -p /opt/snt-bot/prompts && cd /opt/snt-bot && tar -xzf - && systemctl restart snt-bot'
 ```
 
-`.env` is not committed to git. Upload it separately on first deploy or when it changes:
+`.env` not in git. Upload first deploy, or when changed:
 
 ```bash
 scp .env hostkey_us:/opt/snt-bot/.env
 ```
 
-## Systemd service
+## Systemd unit
 
 Installed unit:
 
@@ -61,7 +62,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Install or refresh the service:
+Install or refresh:
 
 ```bash
 ssh hostkey_us "cat > /etc/systemd/system/snt-bot.service <<'EOF'
@@ -84,9 +85,9 @@ systemctl daemon-reload
 systemctl enable --now snt-bot"
 ```
 
-## Operations
+## Ops
 
-Check status:
+Status:
 
 ```bash
 ssh hostkey_us 'systemctl status snt-bot --no-pager --full'
@@ -98,7 +99,7 @@ Restart:
 ssh hostkey_us 'systemctl restart snt-bot'
 ```
 
-Tail logs:
+Logs:
 
 ```bash
 ssh hostkey_us 'journalctl -u snt-bot -f'
@@ -106,51 +107,60 @@ ssh hostkey_us 'journalctl -u snt-bot -f'
 
 ## Config notes
 
-`.env` is JSON, not shell syntax.
+`.env` uses JSON, not shell syntax.
 
-Required fields for a working bot:
+Must-have keys:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_ALLOWED_USER_IDS`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
-Current AI endpoint used by tests and deployment:
+Current AI endpoint:
 
 - `OPENAI_BASE_URL`: `http://10.8.0.4:8181`
 - `OPENAI_MODEL`: `Qwen3.6-35B-A3B-Q4_K_M.gguf`
 - `OPENAI_API_KEY`: empty string
 
-Current bot-side model call timeout:
+Current bot AI timeout:
 
-- `180s` per request in `internal/ai/client.go`
+- `180s` per req in `internal/ai/client.go`
 
-`OPENAI_API_KEY` is intentionally empty for this endpoint. Repo tests and direct probes to `/health` and `/v1/models` succeeded without authentication.
+Endpoint auth note:
+
+- `OPENAI_API_KEY` intentionally empty
+- tests + `/health` + `/v1/models` worked without auth
+
+Model risk note:
+
+- current endpoint model = Qwen thinking model
+- use big token budget for extraction calls
+- weak/small models may drift JSON schema, hurt extract reliability
 
 ## Telegram setup
 
-1. Create the bot in `@BotFather` with `/newbot`.
-2. Copy the issued token into `TELEGRAM_BOT_TOKEN`.
-3. Get the allowed Telegram user ID.
-4. Put that numeric ID into `TELEGRAM_ALLOWED_USER_IDS`, for example:
+1. Create bot in `@BotFather` via `/newbot`.
+2. Put token into `TELEGRAM_BOT_TOKEN`.
+3. Get allowed Telegram user ID.
+4. Put numeric ID into `TELEGRAM_ALLOWED_USER_IDS`, example:
 
 ```json
 "TELEGRAM_ALLOWED_USER_IDS": [123456789]
 ```
 
-5. Restart the service:
+5. Restart svc:
 
 ```bash
 ssh hostkey_us 'systemctl restart snt-bot'
 ```
 
-6. Open the bot in Telegram and send `/start`.
+6. Open bot, send `/start`.
 
-## Verification performed
+## Verification done
 
-- Local build completed for `linux/amd64`
-- `go test ./...` passed with workspace-local `GOCACHE`
-- Remote service installed and started successfully
-- Remote endpoint `http://10.8.0.4:8181/health` returned `200`
-- Remote endpoint `http://10.8.0.4:8181/v1/models` returned `200` without auth
+- local `linux/amd64` build passed
+- `go test ./...` passed with local `GOCACHE`
+- remote svc installed + started
+- remote `http://10.8.0.4:8181/health` -> `200`
+- remote `http://10.8.0.4:8181/v1/models` -> `200`, no auth
 - `vim` installed on `hostkey_us`
