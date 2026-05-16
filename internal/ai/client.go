@@ -45,6 +45,12 @@ type Response struct {
 	Fields  Fields `json:"fields"`
 }
 
+type PlotResponse struct {
+	Status  string `json:"status"`
+	Plot    string `json:"plot"`
+	Message string `json:"message"`
+}
+
 // chatCompletionReq omits ResponseFormat: llama.cpp crashes when json_schema
 // grammar combines with Qwen3 thinking tokens (</think> triggers grammar stack error).
 type chatCompletionReq struct {
@@ -57,20 +63,18 @@ type chatCompletionReq struct {
 }
 
 type Client struct {
-	chatURL   string
-	baseURL   string
-	model     string
-	apiKey    string
-	sysPrompt string
+	chatURL string
+	baseURL string
+	model   string
+	apiKey  string
 }
 
-func NewClient(baseURL, model, apiKey, sysPrompt string) *Client {
+func NewClient(baseURL, model, apiKey string) *Client {
 	return &Client{
-		chatURL:   baseURL + "/v1/chat/completions",
-		baseURL:   baseURL,
-		model:     model,
-		apiKey:    apiKey,
-		sysPrompt: sysPrompt,
+		chatURL: baseURL + "/v1/chat/completions",
+		baseURL: baseURL,
+		model:   model,
+		apiKey:  apiKey,
 	}
 }
 
@@ -89,18 +93,9 @@ func (c *Client) Healthy() bool {
 	return resp.StatusCode == 200
 }
 
-func (c *Client) Call(ctx context.Context, history []Msg) (Response, error) {
-	resp, err := c.call(ctx, history)
-	if err != nil && ctx.Err() == nil {
-		// retry once only when parent context is still alive
-		resp, err = c.call(ctx, history)
-	}
-	return resp, err
-}
-
-func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
+func (c *Client) callRaw(ctx context.Context, sysPrompt string, history []Msg) (string, error) {
 	messages := make([]Msg, 0, len(history)+1)
-	messages = append(messages, Msg{Role: "system", Content: c.sysPrompt})
+	messages = append(messages, Msg{Role: "system", Content: sysPrompt})
 	messages = append(messages, history...)
 
 	payload := chatCompletionReq{
@@ -113,7 +108,7 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return Response{}, fmt.Errorf("marshal request: %w", err)
+		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, modelCallTimeout)
@@ -121,7 +116,7 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 
 	req, err := http.NewRequestWithContext(callCtx, "POST", c.chatURL, bytes.NewReader(body))
 	if err != nil {
-		return Response{}, fmt.Errorf("new request: %w", err)
+		return "", fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -130,13 +125,13 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return Response{}, fmt.Errorf("model call: %w", err)
+		return "", fmt.Errorf("model call: %w", err)
 	}
 	defer res.Body.Close()
 
 	raw, err := io.ReadAll(res.Body)
 	if err != nil {
-		return Response{}, fmt.Errorf("read response: %w", err)
+		return "", fmt.Errorf("read response: %w", err)
 	}
 
 	var outer struct {
@@ -151,23 +146,47 @@ func (c *Client) call(ctx context.Context, history []Msg) (Response, error) {
 		if len(snippet) > 300 {
 			snippet = snippet[:300]
 		}
-		return Response{}, fmt.Errorf("bad completions response (HTTP %d): %s", res.StatusCode, snippet)
+		return "", fmt.Errorf("bad completions response (HTTP %d): %s", res.StatusCode, snippet)
 	}
 	if err := json.Unmarshal(raw, &outer); err != nil || len(outer.Choices) == 0 {
-		return Response{}, fmt.Errorf("bad completions response (HTTP %d)", res.StatusCode)
+		return "", fmt.Errorf("bad completions response (HTTP %d)", res.StatusCode)
 	}
 
 	content := strings.TrimSpace(outer.Choices[0].Message.Content)
 	startIdx := strings.Index(content, "{")
 	endIdx := strings.LastIndex(content, "}")
 	if startIdx < 0 || endIdx < startIdx {
-		return Response{}, fmt.Errorf("no JSON object in model response")
+		return "", fmt.Errorf("no JSON object in model response")
 	}
-	content = content[startIdx : endIdx+1]
+	return content[startIdx : endIdx+1], nil
+}
 
+func (c *Client) CallWithSysPrompt(ctx context.Context, sysPrompt string, history []Msg) (Response, error) {
+	content, err := c.callRaw(ctx, sysPrompt, history)
+	if err != nil && ctx.Err() == nil {
+		content, err = c.callRaw(ctx, sysPrompt, history)
+	}
+	if err != nil {
+		return Response{}, err
+	}
 	var resp Response
 	if err := json.Unmarshal([]byte(content), &resp); err != nil {
 		return Response{}, fmt.Errorf("parse model response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *Client) CallPlot(ctx context.Context, sysPrompt string, history []Msg) (PlotResponse, error) {
+	content, err := c.callRaw(ctx, sysPrompt, history)
+	if err != nil && ctx.Err() == nil {
+		content, err = c.callRaw(ctx, sysPrompt, history)
+	}
+	if err != nil {
+		return PlotResponse{}, err
+	}
+	var resp PlotResponse
+	if err := json.Unmarshal([]byte(content), &resp); err != nil {
+		return PlotResponse{}, fmt.Errorf("parse plot response: %w", err)
 	}
 	return resp, nil
 }
@@ -187,4 +206,10 @@ func BuildPrompt(tpl string, paymentTypes, plots, categoriesIncome, categoriesEx
 	r = strings.ReplaceAll(r, "{{TODAY}}", today)
 	r = strings.ReplaceAll(r, "{{YESTERDAY}}", yesterday)
 	return r
+}
+
+// BuildPlotPrompt substitutes {{PLOTS}} in the plot extraction prompt template.
+func BuildPlotPrompt(tpl string, plots []string) string {
+	b, _ := json.Marshal(plots)
+	return strings.ReplaceAll(tpl, "{{PLOTS}}", string(b))
 }

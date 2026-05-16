@@ -4,33 +4,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
-type ContributionType struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	PayerType string `json:"payer_type"`
-}
-
 type Config struct {
-	TelegramBotToken               string             `json:"TELEGRAM_BOT_TOKEN"`
-	TelegramAllowedUserIDs         []int64            `json:"TELEGRAM_ALLOWED_USER_IDS"`
-	InitialBalance                 float64            `json:"INITIAL_BALANCE"`
-	OpenAIBaseURL                  string             `json:"OPENAI_BASE_URL"`
-	OpenAIAPIKey                   string             `json:"OPENAI_API_KEY"`
-	OpenAIModel                    string             `json:"OPENAI_MODEL"`
-	DBFile                         string             `json:"DB_FILE"`
-	StateTimeoutMinutes            int                `json:"STATE_TIMEOUT_MINUTES"`
-	CategoriesIncome               []string           `json:"CATEGORIES_INCOME"`
-	CategoriesExpense              []string           `json:"CATEGORIES_EXPENSE"`
-	PaymentTypes                   []string           `json:"PAYMENT_TYPES"`
-	PlotMembershipMap              map[string]string  `json:"PLOT_MEMBERSHIP"`
-	ContributionTypes              []ContributionType `json:"CONTRIBUTION_TYPES"`
-	ContributionPriorityMember     []string           `json:"CONTRIBUTION_PRIORITY_MEMBER"`
-	ContributionPriorityIndividual []string           `json:"CONTRIBUTION_PRIORITY_INDIVIDUAL"`
-	ContributionAmounts            map[string]float64 `json:"CONTRIBUTION_AMOUNTS"`
-	MaxPaymentAmount               float64            `json:"MAX_PAYMENT_AMOUNT"`
+	TelegramBotToken       string            `json:"TELEGRAM_BOT_TOKEN"`
+	TelegramAllowedUserIDs []int64           `json:"TELEGRAM_ALLOWED_USER_IDS"`
+	InitialBalance         float64           `json:"INITIAL_BALANCE"`
+	OpenAIBaseURL          string            `json:"OPENAI_BASE_URL"`
+	OpenAIAPIKey           string            `json:"OPENAI_API_KEY"`
+	OpenAIModel            string            `json:"OPENAI_MODEL"`
+	DBFile                 string            `json:"DB_FILE"`
+	StateTimeoutMinutes    int               `json:"STATE_TIMEOUT_MINUTES"`
+	CategoriesIncome       []string          `json:"CATEGORIES_INCOME"`
+	CategoriesExpense      []string          `json:"CATEGORIES_EXPENSE"`
+	PaymentTypes           []string          `json:"PAYMENT_TYPES"`
+	PlotMembershipMap      map[string]string `json:"PLOT_MEMBERSHIP"`
+	CategoriesIncomeIndiv  map[string][2]int `json:"CATEGORIES_INCOME_INDIV"`
+	CategoriesIncomeMember map[string][2]int `json:"CATEGORIES_INCOME_MEMBER"`
 }
 
 func Load(path string) (*Config, error) {
@@ -79,31 +71,39 @@ func (c *Config) validate() error {
 	if len(c.PlotMembershipMap) == 0 {
 		return fmt.Errorf("PLOT_MEMBERSHIP is required")
 	}
-	if len(c.ContributionAmounts) == 0 {
-		return fmt.Errorf("CONTRIBUTION_AMOUNTS is required")
+	if len(c.CategoriesIncomeIndiv) == 0 {
+		return fmt.Errorf("CATEGORIES_INCOME_INDIV is required")
+	}
+	if len(c.CategoriesIncomeMember) == 0 {
+		return fmt.Errorf("CATEGORIES_INCOME_MEMBER is required")
 	}
 	return nil
 }
 
-// Plots derives the full list of valid plot identifiers from PLOT_MEMBERSHIP keys.
-// Keys may be comma-separated (e.g. "27,28") and are expanded to individual entries.
+// Plots returns all valid plot IDs from PLOT_MEMBERSHIP keys.
+// Composite keys like "27,28" are kept as-is AND expanded to individual parts.
 func (c *Config) Plots() []string {
 	seen := make(map[string]struct{})
 	var out []string
+	add := func(p string) {
+		if _, dup := seen[p]; !dup {
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
 	for key := range c.PlotMembershipMap {
+		if strings.Contains(key, ",") {
+			add(key)
+		}
 		for _, part := range strings.Split(key, ",") {
-			p := strings.TrimSpace(part)
-			if _, dup := seen[p]; !dup {
-				seen[p] = struct{}{}
-				out = append(out, p)
-			}
+			add(strings.TrimSpace(part))
 		}
 	}
 	return out
 }
 
-// PlotMembership returns the membership type for a plot.
-// Handles comma-separated keys such as "27,28".
+// PlotMembership returns membership type for a plot.
+// Handles composite keys like "27,28".
 func (c *Config) PlotMembership(plot string) string {
 	if m, ok := c.PlotMembershipMap[plot]; ok {
 		return m
@@ -127,9 +127,36 @@ func (c *Config) IsAllowedUser(userID int64) bool {
 	return false
 }
 
-func (c *Config) PriorityFor(membership string) []string {
+// DuesFor returns dues map for a membership type.
+// [2]int = [priority, annual_limit_rub]
+func (c *Config) DuesFor(membership string) map[string][2]int {
 	if membership == "Индивидуал" {
-		return c.ContributionPriorityIndividual
+		return c.CategoriesIncomeIndiv
 	}
-	return c.ContributionPriorityMember
+	return c.CategoriesIncomeMember
+}
+
+// PlotCount returns number of plots in a comma-separated plot string.
+func (c *Config) PlotCount(plot string) int {
+	return len(strings.Split(plot, ","))
+}
+
+// SortedCategories returns category names sorted by priority (v[0]) ascending.
+func SortedCategories(dues map[string][2]int) []string {
+	type entry struct {
+		name     string
+		priority int
+	}
+	entries := make([]entry, 0, len(dues))
+	for name, v := range dues {
+		entries = append(entries, entry{name, v[0]})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].priority < entries[j].priority
+	})
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.name
+	}
+	return out
 }

@@ -43,11 +43,20 @@ func main() {
 		log.Fatalf("read prompt: %v", err)
 	}
 
+	plotPromptPath := os.Getenv("PLOT_PROMPT_PATH")
+	if plotPromptPath == "" {
+		plotPromptPath = "prompts/plot_extraction.md"
+	}
+	plotPromptTpl, err := os.ReadFile(plotPromptPath)
+	if err != nil {
+		log.Fatalf("read plot prompt: %v", err)
+	}
+
 	now := time.Now()
 	today := now.Format("02.01.2006")
 	yesterday := now.AddDate(0, 0, -1).Format("02.01.2006")
 
-	sysPrompt := ai.BuildPrompt(
+	extractionSysPrompt := ai.BuildPrompt(
 		string(promptTpl),
 		cfg.PaymentTypes,
 		cfg.Plots(),
@@ -57,10 +66,12 @@ func main() {
 		yesterday,
 	)
 
-	client := ai.NewClient(cfg.OpenAIBaseURL, cfg.OpenAIModel, cfg.OpenAIAPIKey, sysPrompt)
+	plotSysPrompt := ai.BuildPlotPrompt(string(plotPromptTpl), cfg.Plots())
+
+	client := ai.NewClient(cfg.OpenAIBaseURL, cfg.OpenAIModel, cfg.OpenAIAPIKey)
 	states := state.NewManager(cfg.StateTimeoutMinutes)
 
-	b, err := bot.New(cfg.TelegramBotToken, sqlDB, cfg, client, states, buildTime)
+	b, err := bot.New(cfg.TelegramBotToken, sqlDB, cfg, client, states, plotSysPrompt, extractionSysPrompt, buildTime)
 	if err != nil {
 		log.Fatalf("create bot: %v", err)
 	}

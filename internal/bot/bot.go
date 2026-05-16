@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,31 +39,35 @@ type validatedFields struct {
 }
 
 type Bot struct {
-	api       *tgbotapi.BotAPI
-	db        *sql.DB
-	cfg       *config.Config
-	client    *ai.Client
-	states    *state.Manager
-	mu        sync.Mutex
-	pending   map[int64]*pendingConfirm
-	busy      map[int64]bool
-	buildTime string
+	api                 *tgbotapi.BotAPI
+	db                  *sql.DB
+	cfg                 *config.Config
+	client              *ai.Client
+	states              *state.Manager
+	mu                  sync.Mutex
+	pending             map[int64]*pendingConfirm
+	busy                map[int64]bool
+	plotSysPrompt       string
+	extractionSysPrompt string
+	buildTime           string
 }
 
-func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, states *state.Manager, buildTime string) (*Bot, error) {
+func New(token string, sqlDB *sql.DB, cfg *config.Config, client *ai.Client, states *state.Manager, plotSysPrompt, extractionSysPrompt string, buildTime string) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("create bot api: %w", err)
 	}
 	return &Bot{
-		api:       api,
-		db:        sqlDB,
-		cfg:       cfg,
-		client:    client,
-		states:    states,
-		pending:   make(map[int64]*pendingConfirm),
-		busy:      make(map[int64]bool),
-		buildTime: buildTime,
+		api:                 api,
+		db:                  sqlDB,
+		cfg:                 cfg,
+		client:              client,
+		states:              states,
+		pending:             make(map[int64]*pendingConfirm),
+		busy:                make(map[int64]bool),
+		plotSysPrompt:       plotSysPrompt,
+		extractionSysPrompt: extractionSysPrompt,
+		buildTime:           buildTime,
 	}, nil
 }
 
@@ -119,6 +124,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		}
 		st.Phase = state.PhaseAdding
 		st.History = nil
+		st.PlotID = ""
 		b.states.Set(userID, st)
 		b.handleAdding(chatID, userID, "")
 		return
@@ -150,15 +156,29 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	st := b.states.Get(userID)
+
+	// Branch 1: No history AND no plot yet — send initial prompt, no AI call needed.
+	if len(st.History) == 0 && st.PlotID == "" {
+		b.send(chatID, "Введите номер вашего участка.")
+		return
+	}
+
+	// Branch 2: Plot not yet confirmed — run plot extraction phase.
+	if st.PlotID == "" {
+		b.handlePlotExtraction(chatID, userID, text)
+		return
+	}
+
+	// Branch 3: Plot confirmed — run main extraction phase.
+	b.handleAddingMain(chatID, userID, text)
+}
+
+func (b *Bot) handlePlotExtraction(chatID, userID int64, text string) {
+	st := b.states.Get(userID)
+
 	if text != "" {
-		st.RetryCount = 0
 		st.History = append(st.History, ai.Msg{Role: "user", Content: text})
 		b.states.Set(userID, st)
-	} else if len(st.History) == 0 {
-		// First call with no user input — ask user to describe the operation directly,
-		// no AI call needed yet.
-		b.send(chatID, "Опишите операцию: дата, сумма, участок, тип платежа, категория. Можно одним сообщением или по частям.")
-		return
 	}
 
 	b.mu.Lock()
@@ -173,7 +193,74 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	resp, err := b.client.Call(ctx, st.History)
+	resp, err := b.client.CallPlot(ctx, b.plotSysPrompt, st.History)
+
+	b.mu.Lock()
+	delete(b.busy, userID)
+	b.mu.Unlock()
+
+	if err != nil {
+		log.Printf("plot extraction error user %d: %v", userID, err)
+		b.send(chatID, "Ошибка связи с AI. Попробуйте ещё раз.")
+		return
+	}
+
+	switch resp.Status {
+	case "abort":
+		b.states.Clear(userID)
+		b.clearPending(userID)
+		b.sendMenu(chatID, resp.Message)
+	case "ready":
+		st = b.states.Get(userID)
+		st.PlotID = resp.Plot
+		st.History = filterUserMessages(st.History)
+		b.states.Set(userID, st)
+		b.handleAddingMain(chatID, userID, "")
+	default: // extracting
+		st = b.states.Get(userID)
+		st.History = append(st.History, ai.Msg{Role: "assistant", Content: resp.Message})
+		b.states.Set(userID, st)
+		b.send(chatID, resp.Message)
+	}
+}
+
+func filterUserMessages(history []ai.Msg) []ai.Msg {
+	var out []ai.Msg
+	for _, m := range history {
+		if m.Role == "user" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func (b *Bot) handleAddingMain(chatID, userID int64, text string) {
+	st := b.states.Get(userID)
+
+	if text != "" {
+		st.RetryCount = 0
+		st.History = append(st.History, ai.Msg{Role: "user", Content: text})
+		b.states.Set(userID, st)
+	}
+
+	membership := b.cfg.PlotMembership(st.PlotID)
+	year := time.Now().Year()
+	payCtx := b.buildPaymentContext(st.PlotID, membership, year)
+	sysPrompt := strings.ReplaceAll(b.extractionSysPrompt, "{{PAYMENT_CONTEXT}}", payCtx)
+
+	b.mu.Lock()
+	if b.busy[userID] {
+		b.mu.Unlock()
+		b.send(chatID, "Обрабатываю предыдущий запрос, подождите...")
+		return
+	}
+	b.busy[userID] = true
+	b.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	resp, err := b.client.CallWithSysPrompt(ctx, sysPrompt, st.History)
 
 	b.mu.Lock()
 	delete(b.busy, userID)
@@ -185,6 +272,7 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 		return
 	}
 
+	st = b.states.Get(userID)
 	st.History = append(st.History, ai.Msg{Role: "assistant", Content: resp.Message})
 	b.states.Set(userID, st)
 
@@ -198,6 +286,44 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	default: // extracting
 		b.send(chatID, resp.Message)
 	}
+}
+
+func (b *Bot) buildPaymentContext(plot, membership string, year int) string {
+	dues := b.cfg.DuesFor(membership)
+	if len(dues) == 0 {
+		return ""
+	}
+
+	categories := config.SortedCategories(dues)
+	plotCount := b.cfg.PlotCount(plot)
+
+	outstanding, err := db.GetOutstanding(b.db, plot, year)
+	if err != nil {
+		log.Printf("buildPaymentContext GetOutstanding: %v", err)
+		outstanding = map[string]float64{}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Контекст платежей участка\n\n")
+	sb.WriteString("| Категория | Лимит | Оплачено | Остаток |\n")
+	sb.WriteString("|---|---|---|---|\n")
+
+	for _, cat := range categories {
+		v := dues[cat]
+		priority, limit := v[0], v[1]
+		effectiveLimit := limit
+		if priority > 1 {
+			effectiveLimit *= plotCount
+		}
+		paid := outstanding[cat]
+		remaining := float64(effectiveLimit) - paid
+		if remaining < 0 {
+			remaining = 0
+		}
+		sb.WriteString(fmt.Sprintf("| %s | %d | %.0f | %.0f |\n", cat, effectiveLimit, paid, remaining))
+	}
+
+	return sb.String()
 }
 
 func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
@@ -235,6 +361,7 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 	b.setPending(userID, &pendingConfirm{rows: rows, curBal: bal, createdAt: time.Now()})
 
 	m := tgbotapi.NewMessage(chatID, formatPreview(rows, bal))
+	m.ParseMode = "MarkdownV2"
 	m.ReplyMarkup = confirmKeyboard()
 	if _, err := b.api.Send(m); err != nil {
 		log.Printf("send confirm user %d: %v", userID, err)
@@ -242,43 +369,12 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 }
 
 func (b *Bot) buildRows(vf validatedFields, year int) ([]distribution.DistributionRow, error) {
-	if vf.Direction == "приход" && len(b.cfg.ContributionAmounts) > 0 && vf.Membership != "-" {
-		alreadyPaid, err := db.GetOutstanding(b.db, vf.Plot, year)
-		if err != nil {
-			return nil, fmt.Errorf("get outstanding: %w", err)
+	if vf.Direction == "приход" && vf.Membership != "-" {
+		dues := b.cfg.DuesFor(vf.Membership)
+		if _, ok := dues[vf.Category]; ok {
+			return b.buildDistributionRows(vf, year)
 		}
-
-		priorities := b.cfg.PriorityFor(vf.Membership)
-
-		outstanding := make(map[string]float64, len(priorities))
-		for _, id := range priorities {
-			outstanding[id] = computeOutstanding(b.cfg.ContributionAmounts[id], alreadyPaid[id])
-		}
-
-		nextYearPaid, err := db.GetOutstanding(b.db, vf.Plot, year+1)
-		if err != nil {
-			return nil, fmt.Errorf("get next year outstanding: %w", err)
-		}
-		nextYearDue := make(map[string]float64, len(priorities))
-		for _, id := range priorities {
-			nextYearDue[id] = computeOutstanding(b.cfg.ContributionAmounts[id], nextYearPaid[id])
-		}
-
-		return distribution.ComputeDistribution(
-			distribution.OperationFields{
-				Date:        vf.Date,
-				Direction:   vf.Direction,
-				PaymentType: vf.PaymentType,
-				Plot:        vf.Plot,
-				Category:    vf.Category,
-				Note:        vf.Note,
-				Membership:  vf.Membership,
-				Amount:      vf.Amount,
-			},
-			outstanding, priorities, year, nextYearDue,
-		)
 	}
-
 	return []distribution.DistributionRow{{
 		ContributionID: vf.Category,
 		Membership:     vf.Membership,
@@ -291,6 +387,51 @@ func (b *Bot) buildRows(vf validatedFields, year int) ([]distribution.Distributi
 		Amount:         vf.Amount,
 		FiscalYear:     year,
 	}}, nil
+}
+
+func (b *Bot) buildDistributionRows(vf validatedFields, year int) ([]distribution.DistributionRow, error) {
+	dues := b.cfg.DuesFor(vf.Membership)
+	categories := config.SortedCategories(dues)
+	plotCount := b.cfg.PlotCount(vf.Plot)
+
+	paidCur, err := db.GetOutstanding(b.db, vf.Plot, year)
+	if err != nil {
+		return nil, fmt.Errorf("get outstanding current year: %w", err)
+	}
+	paidNext, err := db.GetOutstanding(b.db, vf.Plot, year+1)
+	if err != nil {
+		return nil, fmt.Errorf("get outstanding next year: %w", err)
+	}
+
+	outstanding := make(map[string]float64, len(dues))
+	nextYearDue := make(map[string]float64, len(dues))
+	for _, cat := range categories {
+		v := dues[cat]
+		priority, limit := v[0], v[1]
+		effectiveLimit := float64(limit)
+		if priority > 1 {
+			effectiveLimit *= float64(plotCount)
+		}
+		if rem := effectiveLimit - paidCur[cat]; rem > 0 {
+			outstanding[cat] = rem
+		}
+		if rem := effectiveLimit - paidNext[cat]; rem > 0 {
+			nextYearDue[cat] = rem
+		}
+	}
+
+	fields := distribution.OperationFields{
+		Date:        vf.Date,
+		Direction:   vf.Direction,
+		PaymentType: vf.PaymentType,
+		Plot:        vf.Plot,
+		Category:    vf.Category,
+		Note:        vf.Note,
+		Membership:  vf.Membership,
+		Amount:      vf.Amount,
+	}
+
+	return distribution.ComputeDistribution(fields, outstanding, categories, year, nextYearDue)
 }
 
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
@@ -357,29 +498,8 @@ func (b *Bot) handleBalanceN(chatID, userID int64, text string) {
 		return
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📊 Баланс: %.2f руб.\n", bal))
-	sb.WriteString(fmt.Sprintf("⬆️ Приход всего: %.2f руб.\n", income))
-	sb.WriteString(fmt.Sprintf("⬇️ Расход всего: %.2f руб.\n", expense))
-	sb.WriteString(fmt.Sprintf("\n🕐 Последние %d операций:\n", len(ops)))
-	for _, op := range ops {
-		dirEmoji := "⬆️"
-		if op.Direction == "расход" {
-			dirEmoji = "⬇️"
-		}
-		sb.WriteString("\n")
-		sb.WriteString(fmt.Sprintf("📅 Дата: %s\n", op.OpDate))
-		sb.WriteString(fmt.Sprintf("%s Направление: %s\n", dirEmoji, op.Direction))
-		sb.WriteString(fmt.Sprintf("💰 Сумма: %.2f руб.\n", op.Amount))
-		sb.WriteString(fmt.Sprintf("📂 Категория: %s\n", op.Category))
-		sb.WriteString(fmt.Sprintf("🏡 Участок: %s\n", op.Plot))
-		sb.WriteString(fmt.Sprintf("👥 Членство: %s\n", op.Membership))
-		sb.WriteString(fmt.Sprintf("💳 Тип платежа: %s\n", op.PaymentType))
-		sb.WriteString(fmt.Sprintf("📊 Баланс после: %.2f руб.\n", op.BalanceAfter))
-	}
-
 	b.states.Clear(userID)
-	b.sendMenu(chatID, sb.String())
+	b.sendMenuMarkdown(chatID, formatBalanceMessage(bal, income, expense, ops))
 }
 
 func (b *Bot) handleExportN(chatID, userID int64, text string) {
@@ -455,15 +575,6 @@ func (b *Bot) validateFields(f ai.Fields) (validatedFields, string) {
 	if amount <= 0 {
 		return validatedFields{}, "сумма должна быть положительной"
 	}
-	if f.Direction != nil && *f.Direction == "приход" &&
-		b.cfg.MaxPaymentAmount > 0 &&
-		amount > b.cfg.MaxPaymentAmount {
-		delta := amount - b.cfg.MaxPaymentAmount
-		return validatedFields{}, fmt.Sprintf(
-			"сумма %.0f руб. превышает максимум за год %.0f руб.; верните плательщику %.0f руб. сдачи",
-			amount, b.cfg.MaxPaymentAmount, delta,
-		)
-	}
 	if f.PaymentType == nil || !contains(b.cfg.PaymentTypes, *f.PaymentType) {
 		return validatedFields{}, "недопустимый тип платежа"
 	}
@@ -519,6 +630,15 @@ func (b *Bot) sendMenu(chatID int64, text string) {
 	}
 }
 
+func (b *Bot) sendMenuMarkdown(chatID int64, text string) {
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "MarkdownV2"
+	m.ReplyMarkup = mainKeyboard()
+	if _, err := b.api.Send(m); err != nil {
+		log.Printf("send markdown menu chatID %d: %v", chatID, err)
+	}
+}
+
 func (b *Bot) setPending(userID int64, p *pendingConfirm) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -568,41 +688,173 @@ func confirmKeyboard() tgbotapi.InlineKeyboardMarkup {
 }
 
 func formatPreview(rows []distribution.DistributionRow, curBal float64) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📋 Предпросмотр (%d строк):\n", len(rows)))
 	bal := curBal
-	for i, r := range rows {
+	tableRows := make([][]string, 0, len(rows))
+	for _, r := range rows {
 		if r.Direction == "приход" {
 			bal += r.Amount
 		} else {
 			bal -= r.Amount
 		}
-		dirEmoji := "⬆️"
-		if r.Direction == "расход" {
-			dirEmoji = "⬇️"
-		}
-		if len(rows) > 1 {
-			sb.WriteString(fmt.Sprintf("\n─── Строка %d ───\n", i+1))
-		} else {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(fmt.Sprintf("📂 Категория: %s\n", r.ContributionID))
-		sb.WriteString(fmt.Sprintf("%s Направление: %s\n", dirEmoji, r.Direction))
-		sb.WriteString(fmt.Sprintf("💰 Сумма: %.2f руб.\n", r.Amount))
-		sb.WriteString(fmt.Sprintf("🏡 Участок: %s\n", r.Plot))
-		sb.WriteString(fmt.Sprintf("👥 Членство: %s\n", r.Membership))
-		sb.WriteString(fmt.Sprintf("💳 Тип платежа: %s\n", r.PaymentType))
-		sb.WriteString(fmt.Sprintf("📊 Баланс после: %.2f руб.\n", bal))
+		tableRows = append(tableRows, []string{
+			r.ContributionID,
+			r.Direction,
+			formatMoney(r.Amount),
+			strconv.Itoa(r.FiscalYear),
+			r.Membership,
+			r.Plot,
+			r.PaymentType,
+			formatMoney(bal),
+		})
 	}
-	sb.WriteString(fmt.Sprintf("\n💳 Итоговый баланс: %.2f руб.", bal))
+
+	var sb strings.Builder
+	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("📋 Предпросмотр (%d строк)", len(rows))))
+	sb.WriteString("\n")
+	sb.WriteString(formatMarkdownTable(
+		[]string{"Категория", "Напр.", "Сумма", "Год", "Членство", "Участок", "Платеж", "Баланс после"},
+		tableRows,
+	))
+	sb.WriteString("\n")
+	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("💳 Итоговый баланс: %s руб.", formatMoney(bal))))
 	return sb.String()
 }
 
-func computeOutstanding(annualDue, alreadyPaid float64) float64 {
-	if d := annualDue - alreadyPaid; d > 0 {
-		return d
+func formatBalanceMessage(balance, income, expense float64, ops []db.OperationRow) string {
+	tableRows := make([][]string, 0, len(ops))
+	for _, op := range ops {
+		tableRows = append(tableRows, []string{
+			op.OpDate,
+			op.Direction,
+			formatMoney(op.Amount),
+			op.Plot,
+			op.Category,
+			op.Membership,
+			op.PaymentType,
+			formatMoney(op.BalanceAfter),
+		})
 	}
-	return 0
+
+	var sb strings.Builder
+	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("📊 Баланс: %s руб.", formatMoney(balance))))
+	sb.WriteString("\n")
+	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("⬆️ Приход всего: %s руб.", formatMoney(income))))
+	sb.WriteString("\n")
+	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("⬇️ Расход всего: %s руб.", formatMoney(expense))))
+	sb.WriteString("\n\n")
+	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("🕐 Последние %d операций", len(ops))))
+	sb.WriteString("\n")
+	sb.WriteString(formatMarkdownTable(
+		[]string{"Дата", "Напр.", "Сумма", "Участок", "Категория", "Членство", "Платеж", "Баланс после"},
+		tableRows,
+	))
+	return sb.String()
+}
+
+func formatMarkdownTable(headers []string, rows [][]string) string {
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len([]rune(h))
+	}
+	for _, row := range rows {
+		for i := range headers {
+			cell := ""
+			if i < len(row) {
+				cell = sanitizeTableCell(row[i])
+			}
+			if w := len([]rune(cell)); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("```\n")
+	sb.WriteString(formatTableRow(headers, widths))
+	sb.WriteString("\n")
+	separator := make([]string, len(headers))
+	for i, width := range widths {
+		separator[i] = strings.Repeat("-", width)
+	}
+	sb.WriteString(formatTableRow(separator, widths))
+	for _, row := range rows {
+		sb.WriteString("\n")
+		cells := make([]string, len(headers))
+		for i := range headers {
+			if i < len(row) {
+				cells[i] = sanitizeTableCell(row[i])
+			}
+		}
+		sb.WriteString(formatTableRow(cells, widths))
+	}
+	sb.WriteString("\n```")
+	return sb.String()
+}
+
+func formatTableRow(cells []string, widths []int) string {
+	var sb strings.Builder
+	sb.WriteString("| ")
+	for i, cell := range cells {
+		if i > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(padRight(cell, widths[i]))
+	}
+	sb.WriteString(" |")
+	return sb.String()
+}
+
+func padRight(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-len(runes))
+}
+
+func sanitizeTableCell(s string) string {
+	replacer := strings.NewReplacer(
+		"\n", " ",
+		"\r", " ",
+		"|", "/",
+		"`", "'",
+		"\\", "/",
+	)
+	s = strings.TrimSpace(replacer.Replace(s))
+	s = regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func escapeMarkdownV2(s string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return replacer.Replace(s)
+}
+
+func formatMoney(v float64) string {
+	return fmt.Sprintf("%.2f", v)
 }
 
 func parseYear(date string) int {

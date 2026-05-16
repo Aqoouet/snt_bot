@@ -18,4 +18,5 @@ repomix-output.xml
 repomix.config.json
 .env.deepseek
 .env.local
+steps/
 

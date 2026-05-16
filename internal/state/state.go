@@ -20,7 +20,8 @@ type State struct {
 	Phase      Phase
 	History    []ai.Msg
 	LastMsg    time.Time
-	RetryCount int // AI validation retry counter; reset on fresh user input
+	RetryCount int    // AI validation retry counter; reset on fresh user input
+	PlotID     string // empty = still extracting plot
 }
 
 type Manager struct {
