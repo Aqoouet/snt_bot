@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +15,12 @@ import (
 	"snt-bot/internal/db"
 	"snt-bot/internal/state"
 )
+
+//go:embed prompts/extraction_agent.md
+var promptTpl []byte
+
+//go:embed prompts/plot_extraction.md
+var plotPromptTpl []byte
 
 var buildTime = "dev"
 
@@ -33,24 +40,6 @@ func main() {
 		log.Fatalf("open db: %v", err)
 	}
 	defer sqlDB.Close()
-
-	promptPath := os.Getenv("PROMPT_PATH")
-	if promptPath == "" {
-		promptPath = "prompts/extraction_agent.md"
-	}
-	promptTpl, err := os.ReadFile(promptPath)
-	if err != nil {
-		log.Fatalf("read prompt: %v", err)
-	}
-
-	plotPromptPath := os.Getenv("PLOT_PROMPT_PATH")
-	if plotPromptPath == "" {
-		plotPromptPath = "prompts/plot_extraction.md"
-	}
-	plotPromptTpl, err := os.ReadFile(plotPromptPath)
-	if err != nil {
-		log.Fatalf("read plot prompt: %v", err)
-	}
 
 	now := time.Now()
 	today := now.Format("02.01.2006")

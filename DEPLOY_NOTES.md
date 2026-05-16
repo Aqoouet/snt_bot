@@ -14,9 +14,8 @@
 
 The deployed runtime consists of:
 
-- `snt-bot` binary
+- `snt-bot` binary (prompts embedded via `//go:embed`)
 - `.env`
-- `prompts/extraction_agent.md`
 
 ## Build and upload
 

@@ -106,6 +106,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
 	userID := msg.From.ID
 	text := strings.TrimSpace(msg.Text)
+	log.Printf("[IN] userID=%d chatID=%d text=%q", userID, chatID, text)
 
 	if text == "Отмена" || (msg.IsCommand() && msg.Command() == "start") {
 		b.states.Clear(userID)
@@ -159,7 +160,10 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 
 	// Branch 1: No history AND no plot yet — send initial prompt, no AI call needed.
 	if len(st.History) == 0 && st.PlotID == "" {
-		b.send(chatID, "Введите номер вашего участка.")
+		const prompt = "Введите номер вашего участка."
+		st.History = append(st.History, ai.Msg{Role: "assistant", Content: prompt})
+		b.states.Set(userID, st)
+		b.send(chatID, prompt)
 		return
 	}
 
@@ -440,6 +444,7 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 	}
 	chatID := cb.Message.Chat.ID
 	userID := cb.From.ID
+	log.Printf("[CALLBACK] userID=%d chatID=%d data=%q", userID, chatID, cb.Data)
 
 	if _, err := b.api.Request(tgbotapi.NewCallback(cb.ID, "")); err != nil {
 		log.Printf("ack callback: %v", err)
@@ -614,6 +619,7 @@ func (b *Bot) effectiveBalance() float64 {
 }
 
 func (b *Bot) send(chatID int64, text string) {
+	log.Printf("[OUT] chatID=%d text=%q", chatID, text)
 	if _, err := b.api.Send(tgbotapi.NewMessage(chatID, text)); err != nil {
 		log.Printf("send chatID %d: %v", chatID, err)
 	}
@@ -623,6 +629,7 @@ func (b *Bot) sendMenu(chatID int64, text string) {
 	if text == "" {
 		text = "Главное меню."
 	}
+	log.Printf("[OUT] chatID=%d text=%q", chatID, text)
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ReplyMarkup = mainKeyboard()
 	if _, err := b.api.Send(m); err != nil {
@@ -631,6 +638,7 @@ func (b *Bot) sendMenu(chatID int64, text string) {
 }
 
 func (b *Bot) sendMenuMarkdown(chatID int64, text string) {
+	log.Printf("[OUT] chatID=%d text=%q", chatID, text)
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = "MarkdownV2"
 	m.ReplyMarkup = mainKeyboard()
