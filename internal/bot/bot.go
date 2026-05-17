@@ -78,9 +78,9 @@ func (b *Bot) Stop() {
 
 func (b *Bot) Run() {
 	msg := fmt.Sprintf("Бот запущен. Сборка: %s", b.buildTime)
-	log.Printf("startup notify: %q to %v", msg, b.cfg.TelegramAllowedUserIDs)
-	for _, uid := range b.cfg.TelegramAllowedUserIDs {
-		b.send(uid, msg)
+	if b.cfg.AdminUserID != 0 {
+		log.Printf("startup notify: %q to admin %d", msg, b.cfg.AdminUserID)
+		b.send(b.cfg.AdminUserID, msg)
 	}
 
 	u := tgbotapi.NewUpdate(0)
@@ -156,12 +156,18 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 }
 
+func (b *Bot) buildPlotPrompt() string {
+	return "Укажите:\n" +
+		"— для прихода: номер участка (напр. 34)\n" +
+		"— для расхода: адресата (напр. Владимир электрик), или «-» если адресат не конкретный"
+}
+
 func (b *Bot) handleAdding(chatID, userID int64, text string) {
 	st := b.states.Get(userID)
 
 	// Branch 1: No history AND no plot yet — send initial prompt, no AI call needed.
 	if len(st.History) == 0 && st.PlotID == "" {
-		const prompt = "Введите номер участка."
+		prompt := b.buildPlotPrompt()
 		st.History = append(st.History, ai.Msg{Role: "assistant", Content: prompt})
 		b.states.Set(userID, st)
 		b.send(chatID, prompt)
@@ -760,17 +766,18 @@ func buildPreviewImage(rows []distribution.DistributionRow, curBal float64) ([]b
 			bal -= r.Amount
 		}
 		tableRows = append(tableRows, []string{
-			sanitizeTableCell(r.ContributionID),
+			sanitizeTableCell(r.OpDate),
 			sanitizeTableCell(r.Direction),
-			formatMoney(r.Amount) + " руб.",
-			sanitizeTableCell(r.Membership),
+			formatMoney(r.Amount),
 			sanitizeTableCell(r.Plot),
-			sanitizeTableCell(r.PaymentType),
-			formatMoney(bal) + " руб.",
+			sanitizeTableCell(r.ContributionID),
+			abbrevMembership(r.Membership),
+			abbrevPayment(r.PaymentType),
+			formatMoney(bal),
 		})
 	}
-	title := fmt.Sprintf("Предпросмотр — %d стр.  |  Баланс: %s руб.", len(rows), formatMoney(bal))
-	headers := []string{"Категория", "Направление", "Сумма", "Членство", "Участок", "Тип оплаты", "Баланс после"}
+	title := fmt.Sprintf("Предпросмотр — %d стр.  |  Баланс: %s", len(rows), formatMoney(bal))
+	headers := []string{"Дата", "Напр.", "Сумма", "Участок", "Категория", "Членство", "Оплата", "Баланс"}
 	return render.RenderTable(title, headers, tableRows)
 }
 
@@ -780,19 +787,19 @@ func buildBalanceImage(balance, income, expense float64, ops []db.OperationRow) 
 		tableRows = append(tableRows, []string{
 			sanitizeTableCell(op.OpDate),
 			sanitizeTableCell(op.Direction),
-			formatMoney(op.Amount) + " руб.",
+			formatMoney(op.Amount),
 			sanitizeTableCell(op.Plot),
 			sanitizeTableCell(op.Category),
-			sanitizeTableCell(op.Membership),
-			sanitizeTableCell(op.PaymentType),
-			formatMoney(op.BalanceAfter) + " руб.",
+			abbrevMembership(op.Membership),
+			abbrevPayment(op.PaymentType),
+			formatMoney(op.BalanceAfter),
 		})
 	}
 	title := fmt.Sprintf(
 		"Баланс: %s  |  Приход: %s  |  Расход: %s  |  Строк: %d",
 		formatMoney(balance), formatMoney(income), formatMoney(expense), len(ops),
 	)
-	headers := []string{"Дата", "Направление", "Сумма", "Участок", "Категория", "Членство", "Тип оплаты", "Баланс после"}
+	headers := []string{"Дата", "Напр.", "Сумма", "Участок", "Категория", "Членство", "Оплата", "Баланс"}
 	return render.RenderTable(title, headers, tableRows)
 }
 
@@ -814,7 +821,33 @@ func sanitizeTableCell(s string) string {
 
 
 func formatMoney(v float64) string {
-	return fmt.Sprintf("%.2f", v)
+	return fmt.Sprintf("%.0f", v)
+}
+
+func abbrevMembership(s string) string {
+	switch s {
+	case "Член":
+		return "Чл."
+	case "Индивидуал":
+		return "Инд"
+	default:
+		return s
+	}
+}
+
+func abbrevPayment(s string) string {
+	switch s {
+	case "Онлайн":
+		return "Онл"
+	case "Карта":
+		return "Кар"
+	case "Бухгалтер":
+		return "Бух"
+	case "Счет":
+		return "Счт"
+	default:
+		return s
+	}
 }
 
 func parseYear(date string) int {

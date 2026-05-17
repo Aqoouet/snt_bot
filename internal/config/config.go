@@ -11,6 +11,7 @@ import (
 type Config struct {
 	TelegramBotToken       string            `json:"TELEGRAM_BOT_TOKEN"`
 	TelegramAllowedUserIDs []int64           `json:"TELEGRAM_ALLOWED_USER_IDS"`
+	AdminUserID            int64             `json:"ADMIN"`
 	InitialBalance         float64           `json:"INITIAL_BALANCE"`
 	OpenAIBaseURL          string            `json:"OPENAI_BASE_URL"`
 	OpenAIAPIKey           string            `json:"OPENAI_API_KEY"`
