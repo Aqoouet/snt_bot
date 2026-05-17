@@ -18,6 +18,7 @@ import (
 	"snt-bot/internal/config"
 	"snt-bot/internal/db"
 	"snt-bot/internal/distribution"
+	"snt-bot/internal/render"
 	"snt-bot/internal/state"
 )
 
@@ -160,7 +161,7 @@ func (b *Bot) handleAdding(chatID, userID int64, text string) {
 
 	// Branch 1: No history AND no plot yet — send initial prompt, no AI call needed.
 	if len(st.History) == 0 && st.PlotID == "" {
-		const prompt = "Введите номер вашего участка."
+		const prompt = "Введите номер участка."
 		st.History = append(st.History, ai.Msg{Role: "assistant", Content: prompt})
 		b.states.Set(userID, st)
 		b.send(chatID, prompt)
@@ -219,8 +220,9 @@ func (b *Bot) handlePlotExtraction(chatID, userID int64, text string) {
 		st.PlotID = resp.Plot
 		st.History = filterUserMessages(st.History)
 		confirmMsg := fmt.Sprintf(
-			"Участок %s подтверждён. Укажите дату, направление (приход/расход), сумму, тип платежа и категорию.",
+			"Участок %s подтверждён.\n\nУкажите в одном сообщении:\n• Дата\n• Направление: приход / расход\n• Сумма\n• Тип платежа: %s\n• Категория (для прихода необязательна — система распределит автоматически по типу плательщика, категориям на этот год и остатку к оплате)",
 			resp.Plot,
+			strings.Join(b.cfg.PaymentTypes, ", "),
 		)
 		st.History = append(st.History, ai.Msg{Role: "assistant", Content: confirmMsg})
 		b.states.Set(userID, st)
@@ -381,11 +383,23 @@ func (b *Bot) handleReady(chatID, userID int64, fields ai.Fields) {
 	bal := b.effectiveBalance()
 	b.setPending(userID, &pendingConfirm{rows: rows, curBal: bal, createdAt: time.Now()})
 
-	m := tgbotapi.NewMessage(chatID, formatPreview(rows, bal))
-	m.ParseMode = "MarkdownV2"
-	m.ReplyMarkup = confirmKeyboard()
-	if _, err := b.api.Send(m); err != nil {
-		log.Printf("send confirm user %d: %v", userID, err)
+	imgBytes, err := buildPreviewImage(rows, bal)
+	if err != nil {
+		log.Printf("render preview user %d: %v", userID, err)
+		// fallback to text
+		m := tgbotapi.NewMessage(chatID, fmt.Sprintf("📋 Предпросмотр (%d строк)", len(rows)))
+		m.ReplyMarkup = confirmKeyboard()
+		_, _ = b.api.Send(m)
+		return
+	}
+
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{
+		Name:  "preview.png",
+		Bytes: imgBytes,
+	})
+	photo.ReplyMarkup = confirmKeyboard()
+	if _, err := b.api.Send(photo); err != nil {
+		log.Printf("send confirm photo user %d: %v", userID, err)
 	}
 }
 
@@ -530,7 +544,22 @@ func (b *Bot) handleBalanceN(chatID, userID int64, text string) {
 	}
 
 	b.states.Clear(userID)
-	b.sendMenuMarkdown(chatID, formatBalanceMessage(bal, income, expense, ops))
+
+	imgBytes, err := buildBalanceImage(bal, income, expense, ops)
+	if err != nil {
+		log.Printf("render balance user %d: %v", userID, err)
+		b.sendMenu(chatID, fmt.Sprintf("📊 Баланс: %.2f руб.", bal))
+		return
+	}
+
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{
+		Name:  "balance.png",
+		Bytes: imgBytes,
+	})
+	photo.ReplyMarkup = mainKeyboard()
+	if _, err := b.api.Send(photo); err != nil {
+		log.Printf("send balance photo user %d: %v", userID, err)
+	}
 }
 
 func (b *Bot) handleExportN(chatID, userID int64, text string) {
@@ -672,15 +701,6 @@ func (b *Bot) sendMenu(chatID int64, text string) {
 	}
 }
 
-func (b *Bot) sendMenuMarkdown(chatID int64, text string) {
-	log.Printf("[OUT] chatID=%d text=%q", chatID, text)
-	m := tgbotapi.NewMessage(chatID, text)
-	m.ParseMode = "MarkdownV2"
-	m.ReplyMarkup = mainKeyboard()
-	if _, err := b.api.Send(m); err != nil {
-		log.Printf("send markdown menu chatID %d: %v", chatID, err)
-	}
-}
 
 func (b *Bot) setPending(userID int64, p *pendingConfirm) {
 	b.mu.Lock()
@@ -730,7 +750,7 @@ func confirmKeyboard() tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
-func formatPreview(rows []distribution.DistributionRow, curBal float64) string {
+func buildPreviewImage(rows []distribution.DistributionRow, curBal float64) ([]byte, error) {
 	bal := curBal
 	tableRows := make([][]string, 0, len(rows))
 	for _, r := range rows {
@@ -740,119 +760,40 @@ func formatPreview(rows []distribution.DistributionRow, curBal float64) string {
 			bal -= r.Amount
 		}
 		tableRows = append(tableRows, []string{
-			r.ContributionID,
-			r.Direction,
-			formatMoney(r.Amount),
-			strconv.Itoa(r.FiscalYear),
-			r.Membership,
-			r.Plot,
-			r.PaymentType,
-			formatMoney(bal),
+			sanitizeTableCell(r.ContributionID),
+			sanitizeTableCell(r.Direction),
+			formatMoney(r.Amount) + " руб.",
+			sanitizeTableCell(r.Membership),
+			sanitizeTableCell(r.Plot),
+			sanitizeTableCell(r.PaymentType),
+			formatMoney(bal) + " руб.",
 		})
 	}
-
-	var sb strings.Builder
-	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("📋 Предпросмотр (%d строк)", len(rows))))
-	sb.WriteString("\n")
-	sb.WriteString(formatMarkdownTable(
-		[]string{"Категория", "Напр.", "Сумма", "Год", "Членство", "Участок", "Платеж", "Баланс после"},
-		tableRows,
-	))
-	sb.WriteString("\n")
-	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("💳 Итоговый баланс: %s руб.", formatMoney(bal))))
-	return sb.String()
+	title := fmt.Sprintf("Предпросмотр — %d стр.  |  Баланс: %s руб.", len(rows), formatMoney(bal))
+	headers := []string{"Категория", "Направление", "Сумма", "Членство", "Участок", "Тип оплаты", "Баланс после"}
+	return render.RenderTable(title, headers, tableRows)
 }
 
-func formatBalanceMessage(balance, income, expense float64, ops []db.OperationRow) string {
+func buildBalanceImage(balance, income, expense float64, ops []db.OperationRow) ([]byte, error) {
 	tableRows := make([][]string, 0, len(ops))
 	for _, op := range ops {
 		tableRows = append(tableRows, []string{
-			op.OpDate,
-			op.Direction,
-			formatMoney(op.Amount),
-			op.Plot,
-			op.Category,
-			op.Membership,
-			op.PaymentType,
-			formatMoney(op.BalanceAfter),
+			sanitizeTableCell(op.OpDate),
+			sanitizeTableCell(op.Direction),
+			formatMoney(op.Amount) + " руб.",
+			sanitizeTableCell(op.Plot),
+			sanitizeTableCell(op.Category),
+			sanitizeTableCell(op.Membership),
+			sanitizeTableCell(op.PaymentType),
+			formatMoney(op.BalanceAfter) + " руб.",
 		})
 	}
-
-	var sb strings.Builder
-	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("📊 Баланс: %s руб.", formatMoney(balance))))
-	sb.WriteString("\n")
-	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("⬆️ Приход всего: %s руб.", formatMoney(income))))
-	sb.WriteString("\n")
-	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("⬇️ Расход всего: %s руб.", formatMoney(expense))))
-	sb.WriteString("\n\n")
-	sb.WriteString(escapeMarkdownV2(fmt.Sprintf("🕐 Последние %d операций", len(ops))))
-	sb.WriteString("\n")
-	sb.WriteString(formatMarkdownTable(
-		[]string{"Дата", "Напр.", "Сумма", "Участок", "Категория", "Членство", "Платеж", "Баланс после"},
-		tableRows,
-	))
-	return sb.String()
-}
-
-func formatMarkdownTable(headers []string, rows [][]string) string {
-	widths := make([]int, len(headers))
-	for i, h := range headers {
-		widths[i] = len([]rune(h))
-	}
-	for _, row := range rows {
-		for i := range headers {
-			cell := ""
-			if i < len(row) {
-				cell = sanitizeTableCell(row[i])
-			}
-			if w := len([]rune(cell)); w > widths[i] {
-				widths[i] = w
-			}
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString("```\n")
-	sb.WriteString(formatTableRow(headers, widths))
-	sb.WriteString("\n")
-	separator := make([]string, len(headers))
-	for i, width := range widths {
-		separator[i] = strings.Repeat("-", width)
-	}
-	sb.WriteString(formatTableRow(separator, widths))
-	for _, row := range rows {
-		sb.WriteString("\n")
-		cells := make([]string, len(headers))
-		for i := range headers {
-			if i < len(row) {
-				cells[i] = sanitizeTableCell(row[i])
-			}
-		}
-		sb.WriteString(formatTableRow(cells, widths))
-	}
-	sb.WriteString("\n```")
-	return sb.String()
-}
-
-func formatTableRow(cells []string, widths []int) string {
-	var sb strings.Builder
-	sb.WriteString("| ")
-	for i, cell := range cells {
-		if i > 0 {
-			sb.WriteString(" | ")
-		}
-		sb.WriteString(padRight(cell, widths[i]))
-	}
-	sb.WriteString(" |")
-	return sb.String()
-}
-
-func padRight(s string, width int) string {
-	runes := []rune(s)
-	if len(runes) >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-len(runes))
+	title := fmt.Sprintf(
+		"Баланс: %s  |  Приход: %s  |  Расход: %s  |  Строк: %d",
+		formatMoney(balance), formatMoney(income), formatMoney(expense), len(ops),
+	)
+	headers := []string{"Дата", "Направление", "Сумма", "Участок", "Категория", "Членство", "Тип оплаты", "Баланс после"}
+	return render.RenderTable(title, headers, tableRows)
 }
 
 func sanitizeTableCell(s string) string {
@@ -871,30 +812,6 @@ func sanitizeTableCell(s string) string {
 	return s
 }
 
-func escapeMarkdownV2(s string) string {
-	replacer := strings.NewReplacer(
-		"\\", "\\\\",
-		"_", "\\_",
-		"*", "\\*",
-		"[", "\\[",
-		"]", "\\]",
-		"(", "\\(",
-		")", "\\)",
-		"~", "\\~",
-		"`", "\\`",
-		">", "\\>",
-		"#", "\\#",
-		"+", "\\+",
-		"-", "\\-",
-		"=", "\\=",
-		"|", "\\|",
-		"{", "\\{",
-		"}", "\\}",
-		".", "\\.",
-		"!", "\\!",
-	)
-	return replacer.Replace(s)
-}
 
 func formatMoney(v float64) string {
 	return fmt.Sprintf("%.2f", v)

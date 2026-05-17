@@ -1,14 +1,13 @@
 package bot
 
 import (
-	"strings"
 	"testing"
 
 	"snt-bot/internal/db"
 	"snt-bot/internal/distribution"
 )
 
-func TestFormatPreviewSingleRow(t *testing.T) {
+func TestBuildPreviewImageSingleRow(t *testing.T) {
 	rows := []distribution.DistributionRow{{
 		ContributionID: "MEMBER_REGULAR",
 		Direction:      "приход",
@@ -19,21 +18,20 @@ func TestFormatPreviewSingleRow(t *testing.T) {
 		PaymentType:    "Наличные",
 	}}
 
-	got := formatPreview(rows, 500)
-
-	for _, want := range []string{
-		"📋 Предпросмотр \\(1 строк\\)",
-		"| Категория      | Напр.  | Сумма   | Год  | Членство | Участок | Платеж   | Баланс после |",
-		"| MEMBER_REGULAR | приход | 1000.00 | 2026 | Член     | 5       | Наличные | 1500.00      |",
-		"💳 Итоговый баланс: 1500\\.00 руб\\.",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("preview missing %q in:\n%s", want, got)
-		}
+	png, err := buildPreviewImage(rows, 500)
+	if err != nil {
+		t.Fatalf("buildPreviewImage error: %v", err)
+	}
+	if len(png) == 0 {
+		t.Fatal("buildPreviewImage returned empty bytes")
+	}
+	// PNG magic bytes
+	if png[0] != 0x89 || png[1] != 'P' || png[2] != 'N' || png[3] != 'G' {
+		t.Fatal("result is not a valid PNG")
 	}
 }
 
-func TestFormatPreviewMultiRowProjectedBalance(t *testing.T) {
+func TestBuildPreviewImageMultiRow(t *testing.T) {
 	rows := []distribution.DistributionRow{
 		{
 			ContributionID: "TARGET_ROAD",
@@ -55,22 +53,16 @@ func TestFormatPreviewMultiRowProjectedBalance(t *testing.T) {
 		},
 	}
 
-	got := formatPreview(rows, 1000)
-
-	for _, want := range []string{
-		"TARGET_ROAD",
-		"TARGET_DITCH",
-		"1300.00",
-		"1250.00",
-		"💳 Итоговый баланс: 1250\\.00 руб\\.",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("preview missing %q in:\n%s", want, got)
-		}
+	png, err := buildPreviewImage(rows, 1000)
+	if err != nil {
+		t.Fatalf("buildPreviewImage multi-row error: %v", err)
+	}
+	if len(png) == 0 {
+		t.Fatal("buildPreviewImage returned empty bytes")
 	}
 }
 
-func TestFormatBalanceMessage(t *testing.T) {
+func TestBuildBalanceImage(t *testing.T) {
 	ops := []db.OperationRow{
 		{
 			OpDate:       "15.05.2026",
@@ -94,38 +86,32 @@ func TestFormatBalanceMessage(t *testing.T) {
 		},
 	}
 
-	got := formatBalanceMessage(1249.5, 1000, 250.5, ops)
-
-	for _, want := range []string{
-		"📊 Баланс: 1249\\.50 руб\\.",
-		"⬆️ Приход всего: 1000\\.00 руб\\.",
-		"⬇️ Расход всего: 250\\.50 руб\\.",
-		"🕐 Последние 2 операций",
-		"| Дата       | Напр.  | Сумма   | Участок | Категория      | Членство | Платеж   | Баланс после |",
-		"| 15.05.2026 | приход | 1000.00 | 5       | MEMBER_REGULAR | Член     | Наличные | 1500.00      |",
-		"| 16.05.2026 | расход | 250.50  | 7       | Хозтовары      | -        | Счет     | 1249.50      |",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("balance message missing %q in:\n%s", want, got)
-		}
+	png, err := buildBalanceImage(1249.5, 1000, 250.5, ops)
+	if err != nil {
+		t.Fatalf("buildBalanceImage error: %v", err)
+	}
+	if len(png) == 0 {
+		t.Fatal("buildBalanceImage returned empty bytes")
+	}
+	if png[0] != 0x89 || png[1] != 'P' || png[2] != 'N' || png[3] != 'G' {
+		t.Fatal("result is not a valid PNG")
 	}
 }
 
-func TestFormatMarkdownTableSanitizesCells(t *testing.T) {
-	got := formatMarkdownTable(
-		[]string{"A", "B"},
-		[][]string{{"foo|bar", "line1\nline2 `x` \\"}},
-	)
-
-	for _, unwanted := range []string{"foo|bar", "\nline2", "`x`", "\\"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("table contains unsanitized fragment %q in:\n%s", unwanted, got)
+func TestSanitizeTableCell(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"foo|bar", "foo/bar"},
+		{"line1\nline2 `x` \\", "line1 line2 'x' /"},
+		{"", "-"},
+		{"  spaces  ", "spaces"},
+	}
+	for _, c := range cases {
+		got := sanitizeTableCell(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeTableCell(%q) = %q, want %q", c.in, got, c.want)
 		}
-	}
-	if !strings.Contains(got, "foo/bar") {
-		t.Fatalf("expected pipe to be sanitized in:\n%s", got)
-	}
-	if !strings.Contains(got, "line1 line2 'x' /") {
-		t.Fatalf("expected multiline/backtick/backslash sanitization in:\n%s", got)
 	}
 }
